@@ -1,0 +1,22 @@
+{
+  "version": "1.0.0",
+  "dataset_name": "secp_normative_golden_dataset",
+  "samples": [
+    {
+      "id": "QA-001",
+      "module_slug": "secp-ponto",
+      "orgao_id": "semad",
+      "question": "Qual é o limite de tolerância de atraso na batida de ponto e a regra para compensação em banco de horas?",
+      "expected_citations": ["[Art. 58, § 1º, CLT]", "[Portaria MTP nº 671/2021, Art. 75]"],
+      "reference_answer": "Não serão descontadas nem computadas como jornada extraordinária as variações de horário no registro de ponto não excedentes de 5 minutos, observado o limite máximo de 10 minutos diários [Art. 58, § 1º, CLT]. O registro eletrônico é regido pelo REP-P conforme [Portaria MTP nº 671/2021, Art. 75]."
+    },
+    {
+      "id": "QA-002",
+      "module_slug": "secp-hora-extra",
+      "orgao_id": "semad",
+      "question": "Quais são os requisitos para aprovação de hora extra e validação do teto orçamentário do órgão?",
+      "expected_citations": ["[Art. 74, Estatuto do Servidor Municipal]", "[Decreto Orçamentário nº 1.402/2025, Art. 12]"],
+      "reference_answer": "A prestação de serviço extraordinário exige prévia autorização da chefia imediata e homologação do ordenador de despesas, limitada a 2 horas diárias [Art. 74, Estatuto do Servidor Municipal], condicionada à disponibilidade de saldo no teto orçamentário mensal da unidade [Decreto Orçamentário nº 1.402/2025, Art. 12]."
+    }
+  ]
+}

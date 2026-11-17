@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <title>SECP — Sistema Eletrônico de Controle de Ponto | Justiça Federal</title>
+    <base href="/" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+            },
+            colors: {
+              secp: {
+                blue: '#002f6c',
+                blueDark: '#00224f',
+                blueLight: '#0b4a99',
+                teal: '#005f73',
+                green: '#007a33',
+                greenDark: '#005e27',
+                gray: '#97999b',
+              },
+            },
+          },
+        },
+      };
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body class="bg-slate-50 text-slate-800 font-sans antialiased selection:bg-[#002f6c] selection:text-white">
+    <app-root></app-root>
+  </body>
+</html>

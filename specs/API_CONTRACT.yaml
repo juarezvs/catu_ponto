@@ -1,0 +1,282 @@
+openapi: 3.1.0
+info:
+  title: SECP - Sistema de Controle e Processos API
+  version: 2.0.0
+  description: >
+    Contrato OpenAPI 3.1 da plataforma modular SECP (Identidade, Ponto, Folha,
+    Férias, Contracheque e Hora Extra) construída em Arquitetura Hexagonal + SOLID,
+    incluindo Copiloto Normativo SRAG (Structured RAG).
+servers:
+  - url: http://localhost:8000/api/v1
+    description: Servidor Local de Desenvolvimento
+paths:
+  /auth/sso/login:
+    post:
+      summary: Autenticação Única (SSO) e emissão de contexto RBAC
+      operationId: loginSso
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SsoLoginRequest'
+      responses:
+        '200':
+          description: Sessão autenticada com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SsoSessionResponse'
+  /hub/modules:
+    get:
+      summary: Lista os Cards de Módulos do Hub Central filtrados pelo RBAC do usuário e órgão ativo
+      operationId: listAuthorizedModules
+      parameters:
+        - name: user_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: orgao_id
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Lista de módulos autorizados com cores temáticas e métricas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HubModulesResponse'
+  /modules/{module_slug}/workspace:
+    get:
+      summary: Retorna o estado completo do módulo (Dashboard, Sidebar Primária e Sidebar Secundária filtrada por RBAC)
+      operationId: getModuleWorkspace
+      parameters:
+        - name: module_slug
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: user_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: orgao_id
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Árvore de navegação e dashboard do módulo
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModuleWorkspaceResponse'
+        '403':
+          description: Acesso negado pelo motor RBAC para este módulo
+  /modules/{module_slug}/subitems/{subitem_slug}:
+    get:
+      summary: Retorna os dados, colunas, KPIs e registros de um subitem específico (ex. Pessoas, Órgãos, Feriados)
+      operationId: getSubitemResource
+      parameters:
+        - name: module_slug
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: subitem_slug
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: user_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Conteúdo tabular e métricas do subitem
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CadastroModuleResponse'
+        '403':
+          description: Usuário sem permissão RBAC para o subitem
+  /srag/query:
+    post:
+      summary: Consulta ao SECP Copiloto Normativo (Structured RAG com citação obrigatória de base legal)
+      operationId: querySragCopilot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SragQueryRequest'
+      responses:
+        '200':
+          description: Resposta ancorada em normas vigentes do órgão com citações verificáveis
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SragQueryResponse'
+components:
+  schemas:
+    SsoLoginRequest:
+      type: object
+      required: [user_id]
+      properties:
+        user_id:
+          type: string
+        orgao_id:
+          type: string
+    SsoSessionResponse:
+      type: object
+      required: [token, user, availableOrgaos]
+      properties:
+        token:
+          type: string
+        user:
+          $ref: '#/components/schemas/UserProfileDTO'
+        availableOrgaos:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrgaoContextDTO'
+    OrgaoContextDTO:
+      type: object
+      required: [id, sigla, nome, unidadeAtiva]
+      properties:
+        id:
+          type: string
+        sigla:
+          type: string
+        nome:
+          type: string
+        unidadeAtiva:
+          type: string
+    UserProfileDTO:
+      type: object
+      required: [id, name, email, roleCode, roleName, organization, avatarInitials, permissions]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        email:
+          type: string
+        roleCode:
+          type: string
+        roleName:
+          type: string
+        organization:
+          type: string
+        avatarInitials:
+          type: string
+        permissions:
+          type: array
+          items:
+            type: string
+    SecpModuleCardDTO:
+      type: object
+      required: [slug, name, shortName, description, themeColorHex, tailwindAccent, icon, badgeText, statsLabel]
+      properties:
+        slug:
+          type: string
+        name:
+          type: string
+        shortName:
+          type: string
+        description:
+          type: string
+        themeColorHex:
+          type: string
+        tailwindAccent:
+          type: string
+        icon:
+          type: string
+        badgeText:
+          type: string
+        statsLabel:
+          type: string
+    HubModulesResponse:
+      type: object
+      required: [user, activeOrgao, modules]
+      properties:
+        user:
+          $ref: '#/components/schemas/UserProfileDTO'
+        activeOrgao:
+          $ref: '#/components/schemas/OrgaoContextDTO'
+        modules:
+          type: array
+          items:
+            $ref: '#/components/schemas/SecpModuleCardDTO'
+    ModuleWorkspaceResponse:
+      type: object
+      required: [module, user, items, dashboard]
+      properties:
+        module:
+          $ref: '#/components/schemas/SecpModuleCardDTO'
+        user:
+          $ref: '#/components/schemas/UserProfileDTO'
+        items:
+          type: array
+          items:
+            type: object
+        dashboard:
+          $ref: '#/components/schemas/CadastroModuleResponse'
+    CadastroModuleResponse:
+      type: object
+      required: [slug, title, subtitle, category, primaryActionLabel, metrics, columns, records]
+      properties:
+        slug:
+          type: string
+        title:
+          type: string
+        subtitle:
+          type: string
+        category:
+          type: string
+        primaryActionLabel:
+          type: string
+        metrics:
+          type: array
+          items:
+            type: object
+        columns:
+          type: array
+          items:
+            type: object
+        records:
+          type: array
+          items:
+            type: object
+    SragQueryRequest:
+      type: object
+      required: [question, user_id, orgao_id]
+      properties:
+        question:
+          type: string
+        user_id:
+          type: string
+        orgao_id:
+          type: string
+        module_slug:
+          type: string
+    SragQueryResponse:
+      type: object
+      required: [answer, citations, confidenceScore, guardrailStatus]
+      properties:
+        answer:
+          type: string
+        citations:
+          type: array
+          items:
+            type: object
+        confidenceScore:
+          type: number
+        guardrailStatus:
+          type: string

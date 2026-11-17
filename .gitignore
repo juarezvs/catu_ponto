@@ -1,0 +1,25 @@
+# Legado e dumps de produção
+secp_antigo/
+
+# Ambiente e segredos
+.env
+*.local
+
+# Python / Backend
+backend/.venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Node / Angular / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.angular/
+node_modules/
+
+# Logs e SO
+*.log
+.DS_Store
+Thumbs.db
