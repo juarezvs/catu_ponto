@@ -1,3 +1,4 @@
+import calendar
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import hashlib
@@ -8,9 +9,24 @@ import bcrypt
 from sqlalchemy import text
 from secp.infrastructure.cache.redis_client import SecpRedisCacheGateway
 from secp.infrastructure.database.postgres_session import ProdRealSyncSessionLocal
+from secp.modules.secp_cadastros.infrastructure.adapters.outbound.equipamentos_schema_bootstrap import (
+    ensure_tipos_equipamento_schema,
+)
+from secp.modules.secp_ponto.infrastructure.adapters.outbound.biometria_facial_service import (
+    cadastrar_biometria_servidor,
+    get_biometria_status,
+    verificar_biometria_servidor,
+)
 from secp.modules.secp_ponto.domain.entities.ponto_models import (
     LIMITE_MARCACOES_CONTABILIZADAS_DIA,
     classificar_tipo_marcacao_por_sequencia,
+)
+from secp.modules.secp_ponto.domain.services.espelho_mensal_engine import (
+    AfastamentoSarhInput,
+    ApuracaoPersistidaInput,
+    EventoCalendarioInput,
+    RegraOrgaoMes,
+    montar_espelho_mensal_completo,
 )
 
 
@@ -275,23 +291,139 @@ class PostgresProdRealPontoRepository:
                 "orgaoSigla": (perfil_row["orgao_sigla"] if perfil_row else None) or "SJAM",
             }
 
-    def get_real_rbac_context(self, matricula: str) -> dict[str, Any]:
+    def get_real_rbac_context(
+        self,
+        matricula: str,
+        orgao: str | None = None,
+        perfil: str | None = None,
+    ) -> dict[str, Any]:
         with ProdRealSyncSessionLocal() as session:
             srv = self._resolve_servidor(session, matricula)
             perfis = session.execute(
                 text(
                     """
-                    SELECT p.codigo, p.nome, o.sigla AS orgao_sigla
+                    SELECT p.codigo, p.nome, p.descricao, p.excecao,
+                           o.id::text AS orgao_id, o.sigla AS orgao_sigla,
+                           o.nome AS orgao_nome, o.fuso_horario AS orgao_fuso,
+                           o.municipio AS orgao_municipio
                     FROM usuarios_perfis up
                     JOIN perfis p ON p.id = up.perfil_id
                     LEFT JOIN orgaos o ON o.id = up.orgao_id
-                    WHERE up.usuario_id = CAST(:uid AS uuid) AND up.ativo = true
+                    WHERE up.usuario_id = CAST(:uid AS uuid)
+                      AND up.ativo = true
+                      AND p.ativo = true
+                    ORDER BY o.sigla ASC NULLS FIRST, p.codigo ASC
                     """
                 ),
                 {"uid": srv["usuario_id"]},
             ).mappings().all()
 
-            perfil_principal = perfis[0]["codigo"] if perfis else "SERVIDOR"
+            perfis_operacionais = [
+                p for p in perfis
+                if not p["excecao"] and not str(p["codigo"]).upper().startswith("EXCECAO_")
+            ]
+            if not perfis_operacionais:
+                perfis_operacionais = list(perfis)
+
+            tem_master_global = any(
+                str(p["codigo"]).upper() == "MASTER" and p["orgao_id"] is None
+                for p in perfis_operacionais
+            )
+
+            orgaos_map: dict[str, dict[str, Any]] = {}
+            if tem_master_global:
+                all_orgaos = session.execute(
+                    text(
+                        """
+                        SELECT id::text AS id, sigla, nome, fuso_horario, municipio
+                        FROM orgaos
+                        WHERE ativo = true
+                        ORDER BY sigla ASC
+                        """
+                    )
+                ).mappings().all()
+                for o in all_orgaos:
+                    orgaos_map[o["id"]] = {
+                        "id": o["id"],
+                        "sigla": o["sigla"],
+                        "nome": o["nome"],
+                        "unidadeLabel": f"{o['sigla']} • {o['municipio'] or 'Sede'}",
+                        "fusoHorario": o["fuso_horario"] or "America/Manaus",
+                    }
+            else:
+                for p in perfis_operacionais:
+                    oid = p["orgao_id"]
+                    if oid and oid not in orgaos_map:
+                        orgaos_map[oid] = {
+                            "id": oid,
+                            "sigla": p["orgao_sigla"],
+                            "nome": p["orgao_nome"],
+                            "unidadeLabel": f"{p['orgao_sigla']} • {p['orgao_municipio'] or 'Sede'}",
+                            "fusoHorario": p["orgao_fuso"] or "America/Manaus",
+                        }
+                if srv["orgao_id"] and srv["orgao_id"] not in orgaos_map:
+                    org_srv = session.execute(
+                        text(
+                            "SELECT id::text AS id, sigla, nome, fuso_horario, municipio FROM orgaos WHERE id = CAST(:oid AS uuid)"
+                        ),
+                        {"oid": srv["orgao_id"]},
+                    ).mappings().first()
+                    if org_srv:
+                        orgaos_map[org_srv["id"]] = {
+                            "id": org_srv["id"],
+                            "sigla": org_srv["sigla"],
+                            "nome": org_srv["nome"],
+                            "unidadeLabel": f"{org_srv['sigla']} • {org_srv['municipio'] or 'Sede'}",
+                            "fusoHorario": org_srv["fuso_horario"] or "America/Manaus",
+                        }
+
+            orgaos_acessiveis = list(orgaos_map.values())
+
+            # Determina órgão ativo dentro dos órgãos acessíveis
+            org_req = (orgao if isinstance(orgao, str) else "").strip().upper()
+            orgao_ativo = None
+            if org_req:
+                orgao_ativo = next(
+                    (
+                        o
+                        for o in orgaos_acessiveis
+                        if o["id"].upper() == org_req or str(o["sigla"]).upper() == org_req
+                    ),
+                    None,
+                )
+            if orgao_ativo is None:
+                orgao_ativo = next(
+                    (o for o in orgaos_acessiveis if o["id"] == srv["orgao_id"]),
+                    orgaos_acessiveis[0] if orgaos_acessiveis else None,
+                )
+
+            # Perfis disponíveis especificamente para o órgão selecionado
+            perfis_no_orgao_map: dict[str, dict[str, Any]] = {}
+            if orgao_ativo:
+                for p in perfis_operacionais:
+                    if p["orgao_id"] == orgao_ativo["id"] or p["orgao_id"] is None:
+                        cod = str(p["codigo"]).upper()
+                        if cod not in perfis_no_orgao_map:
+                            perfis_no_orgao_map[cod] = {
+                                "codigo": cod,
+                                "nome": p["nome"],
+                                "descricao": p["descricao"] or p["nome"],
+                            }
+
+            if not perfis_no_orgao_map:
+                perfis_no_orgao_map["SERVIDOR"] = {
+                    "codigo": "SERVIDOR",
+                    "nome": "Servidor",
+                    "descricao": "Consulta própria de frequência e espelho.",
+                }
+
+            perfis_disponiveis = list(perfis_no_orgao_map.values())
+            pref_req = (perfil if isinstance(perfil, str) else "").strip().upper()
+            if pref_req and pref_req in perfis_no_orgao_map:
+                perfil_principal = pref_req
+            else:
+                perfil_principal = perfis_disponiveis[0]["codigo"]
+
             perms = session.execute(
                 text(
                     """
@@ -308,6 +440,9 @@ class PostgresProdRealPontoRepository:
 
             return {
                 "servidor": srv,
+                "orgaosAcessiveis": orgaos_acessiveis,
+                "orgaoAtivo": orgao_ativo,
+                "perfisDisponiveisNoOrgao": perfis_disponiveis,
                 "perfisVinculados": [dict(p) for p in perfis],
                 "perfilAtivo": perfil_principal,
                 "permissoes": list(perms),
@@ -320,6 +455,7 @@ class PostgresProdRealPontoRepository:
             return cached
 
         with ProdRealSyncSessionLocal() as session:
+            ensure_tipos_equipamento_schema(session)
             srv = self._resolve_servidor(session, matricula)
             reg = self.get_regulamentacao_orgao(srv["orgao_sigla"])
             fuso_srv = srv["fuso_horario"] or "America/Manaus"
@@ -333,9 +469,15 @@ class PostgresProdRealPontoRepository:
                     """
                     SELECT m.id::text, m.data_hora, m.tipo::text, m.fonte::text, m.fuso_horario,
                            COALESCE(mb.hash_registro, md5(m.id::text)) AS hash_registro,
-                           COALESCE(mb.equipamento_codigo, m.fonte::text) AS equipamento
+                           COALESCE(eb.nome, mb.equipamento_codigo, m.fonte::text) AS equipamento,
+                           mb.origem::text AS origem_bruta,
+                           teb.icone AS tipo_equipamento_icone,
+                           teb.nome AS tipo_equipamento_nome
                     FROM marcacoes m
                     LEFT JOIN marcacoes_brutas mb ON mb.marcacao_id = m.id
+                    LEFT JOIN equipamentos_biometricos_eventos ebe ON ebe.marcacao_id = m.id
+                    LEFT JOIN equipamentos_biometricos eb ON eb.id = ebe.equipamento_id OR eb.codigo = mb.equipamento_codigo
+                    LEFT JOIN tipos_equipamento_biometrico teb ON teb.id = eb.tipo_equipamento_id
                     WHERE m.servidor_id = CAST(:sid AS uuid)
                       AND m.data_referencia = :hoje
                       AND m.status = 'VALIDA'
@@ -357,6 +499,14 @@ class PostgresProdRealPontoRepository:
                     "tipoClassificado": r["tipo"],
                     "hashSha256": r["hash_registro"],
                     "equipamentoOuOrigem": r["equipamento"],
+                    "origemIcone": self._resolver_icone_origem(
+                        r["tipo_equipamento_icone"],
+                        r["fonte"],
+                        r["origem_bruta"],
+                        r["equipamento"],
+                        r["tipo"],
+                    ),
+                    "tipoEquipamentoNome": r["tipo_equipamento_nome"],
                     "imutavel": True,
                 }
                 for idx, r in enumerate(marcacoes_rows)
@@ -452,6 +602,28 @@ class PostgresProdRealPontoRepository:
                 {"sid": srv["servidor_id"], "hoje": hoje},
             ).scalar_one()
 
+            ultima_marcacao = session.execute(
+                text(
+                    """
+                    SELECT data_hora FROM marcacoes
+                    WHERE servidor_id = CAST(:sid AS uuid)
+                      AND data_referencia = :hoje
+                      AND status = 'VALIDA'
+                    ORDER BY data_hora DESC
+                    LIMIT 1
+                    """
+                ),
+                {"sid": srv["servidor_id"], "hoje": hoje},
+            ).scalar_one_or_none()
+
+            if ultima_marcacao is not None:
+                ultima_naive = ultima_marcacao.replace(tzinfo=None) if getattr(ultima_marcacao, "tzinfo", None) else ultima_marcacao
+                diff_sec = (agora - ultima_naive).total_seconds()
+                if diff_sec < 300:
+                    raise ValueError(
+                        f"Batida duplicada bloqueada pela RN-03: aguarde 5 minutos entre registros (decorridos {max(0, int(diff_sec))}s)."
+                    )
+
             if int(qtd_hoje) >= LIMITE_MARCACOES_CONTABILIZADAS_DIA:
                 raise ValueError("Limite diário de 6 marcações contabilizadas já atingido.")
 
@@ -467,7 +639,8 @@ class PostgresProdRealPontoRepository:
 
             marcacao_id = str(uuid.uuid4())
             bruta_id = str(uuid.uuid4())
-            fonte_db = "FACIAL_WEB" if fonte in ("FACIAL", "FACIAL_WEB") else "WEB"
+            is_facial = fonte in ("FACIAL", "FACIAL_WEB", "BIOMETRIA_FACIAL")
+            fonte_db = "BIOMETRIA_FACIAL" if is_facial else "WEB"
             hash_reg = hashlib.sha256(
                 f"{srv['matricula']}|{agora.isoformat()}|{fonte_db}|{tipo_db}".encode("utf-8")
             ).hexdigest()
@@ -516,8 +689,8 @@ class PostgresProdRealPontoRepository:
                     "cpf": srv["cpf"],
                     "mat": srv["matricula"],
                     "dh": agora,
-                    "equip": "PORTAL-WEB-FACIAL" if fonte == "FACIAL" else "PORTAL-WEB",
-                    "origem": "FACIAL" if fonte == "FACIAL" else "WEB",
+                    "equip": "PORTAL-WEB-FACIAL" if is_facial else "PORTAL-WEB",
+                    "origem": "FACIAL_AUTORIZADO" if is_facial else "WEB_AUTORIZADO",
                     "hash_reg": hash_reg,
                     "sid": srv["servidor_id"],
                     "mid": marcacao_id,
@@ -539,18 +712,20 @@ class PostgresProdRealPontoRepository:
                 "tipoClassificado": tipo_db,
                 "hashSha256": hash_reg,
                 "equipamentoOuOrigem": "Biometria Facial Web" if fonte == "FACIAL" else "Portal Web Institucional",
+                "origemIcone": "facial" if fonte == "FACIAL" else "computador",
                 "imutavel": True,
             }
 
     def get_real_espelho_mensal(
         self, matricula: str, ano: int, mes: int
     ) -> dict[str, Any]:
-        cache_key = f"secp:prod_real:espelho:{matricula.upper()}:{ano}:{mes}"
+        cache_key = f"secp:prod_real:espelho:v4:{matricula.upper()}:{ano}:{mes}"
         cached = self._redis.get_json(cache_key)
         if isinstance(cached, dict):
             return cached
 
         with ProdRealSyncSessionLocal() as session:
+            ensure_tipos_equipamento_schema(session)
             srv = self._resolve_servidor(session, matricula)
             ap_rows = session.execute(
                 text(
@@ -573,9 +748,16 @@ class PostgresProdRealPontoRepository:
                     """
                     SELECT m.id::text, m.data_referencia, m.data_hora, m.tipo::text, m.fonte::text,
                            m.fuso_horario, COALESCE(mb.hash_registro, md5(m.id::text)) AS hash_registro,
-                           COALESCE(mb.equipamento_codigo, m.fonte::text) AS equipamento
+                           COALESCE(eb.nome, mb.equipamento_codigo, m.fonte::text) AS equipamento,
+                           eb.localizacao AS equipamento_localizacao,
+                           mb.origem::text AS origem_bruta,
+                           teb.icone AS tipo_equipamento_icone,
+                           teb.nome AS tipo_equipamento_nome
                     FROM marcacoes m
                     LEFT JOIN marcacoes_brutas mb ON mb.marcacao_id = m.id
+                    LEFT JOIN equipamentos_biometricos_eventos ebe ON ebe.marcacao_id = m.id
+                    LEFT JOIN equipamentos_biometricos eb ON eb.id = ebe.equipamento_id OR eb.codigo = mb.equipamento_codigo
+                    LEFT JOIN tipos_equipamento_biometrico teb ON teb.id = eb.tipo_equipamento_id
                     WHERE m.servidor_id = CAST(:sid AS uuid)
                       AND EXTRACT(YEAR FROM m.data_referencia) = :ano
                       AND EXTRACT(MONTH FROM m.data_referencia) = :mes
@@ -590,6 +772,14 @@ class PostgresProdRealPontoRepository:
             for m in marc_rows:
                 d_iso = m["data_referencia"].isoformat()
                 lst = marc_by_day.setdefault(d_iso, [])
+                fonte_norm = self._normalizar_fonte(m["fonte"])
+                loc_default = (
+                    "Biometria Facial Web"
+                    if fonte_norm == "FACIAL"
+                    else "Portal Web Institucional"
+                    if fonte_norm == "WEB"
+                    else "Unidade Judiciária"
+                )
                 lst.append(
                     {
                         "id": m["id"],
@@ -597,66 +787,117 @@ class PostgresProdRealPontoRepository:
                         "horario": m["data_hora"].strftime("%H:%M:%S"),
                         "dataReferencia": d_iso,
                         "fusoHorario": m["fuso_horario"] or srv["fuso_horario"],
-                        "fonte": self._normalizar_fonte(m["fonte"]),
+                        "fonte": fonte_norm,
                         "tipoClassificado": m["tipo"],
                         "hashSha256": m["hash_registro"],
                         "equipamentoOuOrigem": m["equipamento"],
+                        "localizacao": m["equipamento_localizacao"] or loc_default,
+                        "origemIcone": self._resolver_icone_origem(
+                            m["tipo_equipamento_icone"],
+                            m["fonte"],
+                            m["origem_bruta"],
+                            m["equipamento"],
+                            m["tipo"],
+                        ),
+                        "tipoEquipamentoNome": m["tipo_equipamento_nome"],
                         "imutavel": True,
                     }
                 )
 
-            dias = []
-            total_prev = 0
-            total_trab = 0
-            total_cred = 0
-            total_deb = 0
-            inconsistencias = 0
-
-            dias_semana_pt = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado", "Domingo"]
-
-            for ap in ap_rows:
-                dt: date = ap["data_referencia"]
-                d_iso = dt.isoformat()
-                prev = int(ap["carga_prevista_minutos"])
-                trab = int(ap["minutos_trabalhados"])
-                cred = int(ap["minutos_credito"])
-                deb = int(ap["minutos_debito"])
-                res_raw = ap["resultado"]
-
-                total_prev += prev
-                total_trab += trab
-                total_cred += cred
-                total_deb += deb
-
-                status_ui, status_label = self._map_resultado_ui(res_raw, cred, deb)
-                if status_ui in ("INCOMPLETA", "DEBITO"):
-                    inconsistencias += 1
-
-                dias.append(
-                    {
-                        "id": ap["id"],
-                        "dataIso": d_iso,
-                        "dataFormatada": dt.strftime("%d/%m/%Y"),
-                        "diaSemana": dias_semana_pt[dt.weekday()],
-                        "diaUtil": dt.weekday() < 5,
-                        "cargaPrevistaMinutos": prev,
-                        "trabalhadoMinutos": trab,
-                        "creditoMinutos": cred,
-                        "debitoMinutos": deb,
-                        "status": status_ui,
-                        "statusLabel": status_label,
-                        "marcacoes": marc_by_day.get(d_iso, []),
-                        "memoriaCalculo": {
-                            "jornadaAplicada": f"{prev // 60}h ({prev} min)",
-                            "janelaExpediente": "Portaria SJAM-DIREF 135/2025 (08:00–15:00)",
-                            "intervaloExigidoMinutos": 0 if prev <= 420 else 60,
-                            "intervaloRealizadoMinutos": int(ap["minutos_intervalo"]),
-                            "toleranciaAplicadaMinutos": 0,
-                            "regraPortaria": f"Resultado oficial apurado no PostgreSQL: {res_raw}",
-                            "observacoes": [ap["observacao"]] if ap["observacao"] else [],
-                        },
-                    }
+            ap_by_day = {
+                ap["data_referencia"].isoformat(): ApuracaoPersistidaInput(
+                    id=ap["id"],
+                    data_iso=ap["data_referencia"].isoformat(),
+                    carga_prevista_minutos=int(ap["carga_prevista_minutos"]),
+                    minutos_trabalhados=int(ap["minutos_trabalhados"]),
+                    minutos_intervalo=int(ap["minutos_intervalo"]),
+                    minutos_credito=int(ap["minutos_credito"]),
+                    minutos_debito=int(ap["minutos_debito"]),
+                    resultado=ap["resultado"],
+                    status=ap["status"],
+                    observacao=ap["observacao"],
                 )
+                for ap in ap_rows
+            }
+
+            cal_rows = session.execute(
+                text(
+                    """
+                    SELECT data_referencia, tipo::text, descricao
+                    FROM calendarios_institucionais
+                    WHERE ativo = true
+                      AND EXTRACT(YEAR FROM data_referencia) = :ano
+                      AND EXTRACT(MONTH FROM data_referencia) = :mes
+                      AND (orgao_id IS NULL OR orgao_id = CAST(:oid AS uuid))
+                    """
+                ),
+                {"ano": ano, "mes": mes, "oid": srv["orgao_id"]},
+            ).mappings().all()
+            cal_by_day = {
+                c["data_referencia"].isoformat(): EventoCalendarioInput(
+                    data_iso=c["data_referencia"].isoformat(),
+                    tipo=c["tipo"],
+                    descricao=c["descricao"],
+                )
+                for c in cal_rows
+            }
+
+            afast_rows = session.execute(
+                text(
+                    """
+                    SELECT data_inicio, data_fim, categoria::text,
+                           CASE WHEN ativo THEN 'GOZADA' ELSE 'CANCELADA' END AS situacao,
+                           tipo_descricao
+                    FROM afastamentos_sarh
+                    WHERE servidor_id = CAST(:sid AS uuid)
+                      AND ativo = true
+                      AND data_inicio <= MAKE_DATE(:ano, :mes, 28) + INTERVAL '4 days'
+                      AND COALESCE(data_fim, data_inicio) >= MAKE_DATE(:ano, :mes, 1)
+                    """
+                ),
+                {"sid": srv["servidor_id"], "ano": ano, "mes": mes},
+            ).mappings().all()
+            afast_inputs = [
+                AfastamentoSarhInput(
+                    data_inicio=a["data_inicio"],
+                    data_fim=a["data_fim"] or a["data_inicio"],
+                    categoria=a["categoria"] or "AFASTAMENTO",
+                    situacao=a["situacao"] or "ATIVA",
+                    descricao=a["tipo_descricao"] or "Afastamento SARH",
+                )
+                for a in afast_rows
+            ]
+
+            sol_rows = session.execute(
+                text(
+                    """
+                    SELECT id::text, tipo::text, status::text, titulo, descricao, data_referencia, criado_em
+                    FROM solicitacoes
+                    WHERE servidor_id = CAST(:sid AS uuid)
+                      AND (
+                        (EXTRACT(YEAR FROM data_referencia) = :ano AND EXTRACT(MONTH FROM data_referencia) = :mes)
+                        OR (EXTRACT(YEAR FROM criado_em) = :ano AND EXTRACT(MONTH FROM criado_em) = :mes)
+                      )
+                    ORDER BY criado_em DESC
+                    LIMIT 50
+                    """
+                ),
+                {"sid": srv["servidor_id"], "ano": ano, "mes": mes},
+            ).mappings().all()
+            sol_list = [
+                {
+                    "id": s_row["id"],
+                    "dataSolicitacao": s_row["criado_em"].strftime("%d/%m/%Y %H:%M") if s_row["criado_em"] else "-",
+                    "periodo": s_row["data_referencia"].strftime("%d/%m/%Y") if s_row["data_referencia"] else "-",
+                    "tipoAjuste": s_row["titulo"] or s_row["tipo"],
+                    "dataAfetada": s_row["data_referencia"].strftime("%d/%m/%Y") if s_row["data_referencia"] else "-",
+                    "status": "APROVADO" if s_row["status"] in ("DEFERIDA", "APROVADA", "HOMOLOGADA") else ("REPROVADO" if s_row["status"] in ("INDEFERIDA", "REPROVADA") else ("CANCELADO" if s_row["status"] == "CANCELADA" else "EM_ANALISE")),
+                    "statusLabel": s_row["status"].replace("_", " ").title(),
+                    "aprovadoPor": "-",
+                    "justificativa": s_row["descricao"] or "-",
+                }
+                for s_row in sol_rows
+            ]
 
             hom = session.execute(
                 text(
@@ -673,24 +914,63 @@ class PostgresProdRealPontoRepository:
                 {"sid": srv["servidor_id"], "ano": ano, "mes": mes},
             ).scalar_one_or_none()
 
-            status_comp = "HOMOLOGADA" if hom == "HOMOLOGADO" else "ABERTA"
+            status_comp = "HOMOLOGADA" if hom == "HOMOLOGADO" else ("ENVIADA_HOMOLOGACAO" if hom == "ENVIADO" else "ABERTA")
+            status_comp_lbl = "Homologado" if hom == "HOMOLOGADO" else ("Enviado para homologação" if hom == "ENVIADO" else "Em andamento")
 
-            result = {
-                "competencia": f"{mes:02d}/{ano}",
-                "competenciaLabel": f"{mes:02d}/{ano}",
-                "statusCompetencia": status_comp,
-                "ultimaSincronizacaoSarh": "Integrado secp_prod_real",
-                "ultimoRecalculo": "Calculado no PostgreSQL",
-                "totalPrevistoMinutos": total_prev,
-                "totalTrabalhadoMinutos": total_trab,
-                "totalCreditoMinutos": total_cred,
-                "totalDebitoMinutos": total_deb,
-                "bancoComputavelMinutos": max(0, total_cred - total_deb),
-                "faltasOuInconsistencias": inconsistencias,
-                "dias": dias,
-            }
+            result = montar_espelho_mensal_completo(
+                ano=ano,
+                mes=mes,
+                hoje_referencia=date.today(),
+                regra=RegraOrgaoMes(),
+                marc_by_day=marc_by_day,
+                ap_by_day=ap_by_day,
+                calendario_by_day=cal_by_day,
+                afastamentos=afast_inputs,
+                solicitacoes_mes=sol_list,
+                status_competencia=status_comp,
+                status_competencia_label=status_comp_lbl,
+                unidade_label=srv.get("unidade_nome") or srv.get("orgao_sigla", ""),
+            )
             self._redis.set_json(cache_key, result, ttl_seconds=60)
             return result
+
+    def recalcular_espelho_real(self, matricula: str, ano: int, mes: int) -> dict[str, Any]:
+        self._redis.invalidate_prefix(f"secp:prod_real:espelho:v4:{matricula.upper()}:{ano}:{mes}")
+        self._redis.invalidate_prefix(f"secp:prod_real:dashboard:{matricula.upper()}")
+        return self.get_real_espelho_mensal(matricula=matricula, ano=ano, mes=mes)
+
+    def enviar_homologacao_real(
+        self,
+        *,
+        matricula: str,
+        ano: int,
+        mes: int,
+        cargo_funcao: str = "",
+        senha: str = "",
+    ) -> dict[str, Any]:
+        if not senha.strip():
+            raise ValueError("Informe a senha de assinatura para enviar para homologação.")
+        with ProdRealSyncSessionLocal() as session:
+            srv = self._resolve_servidor(session, matricula)
+            user_row = session.execute(
+                text("SELECT senha_hash FROM usuarios WHERE UPPER(matricula) = :m LIMIT 1"),
+                {"m": matricula.strip().upper()},
+            ).mappings().first()
+            if user_row and user_row.get("senha_hash"):
+                ok = bcrypt.checkpw(senha.encode("utf-8"), str(user_row["senha_hash"]).encode("utf-8"))
+                if not ok:
+                    raise PermissionError("Senha de assinatura inválida.")
+        self._redis.invalidate_prefix(f"secp:prod_real:espelho:v4:{matricula.upper()}:{ano}:{mes}")
+        return {
+            "enviado": True,
+            "competencia": f"{mes:02d}/{ano}",
+            "assinante": srv["nome_funcional"],
+            "matricula": srv["matricula"],
+            "cargoFuncao": cargo_funcao or "Servidor",
+            "enviadoEm": datetime.now().strftime("%d/%m/%Y %H:%M"),
+            "statusCompetencia": "ENVIADA_HOMOLOGACAO",
+            "statusCompetenciaLabel": "Enviado para homologação",
+        }
 
     def list_real_solicitacoes(self, matricula: str) -> list[dict[str, Any]]:
         with ProdRealSyncSessionLocal() as session:
@@ -822,6 +1102,446 @@ class PostgresProdRealPontoRepository:
                 "criadoEm": datetime.now().strftime("%d/%m/%Y %H:%M"),
             }
 
+    def get_chefia_escopo(self, matricula: str) -> dict[str, Any]:
+        """Retorna todas as unidades geridas (e subordinadas recursivamente) e seus servidores."""
+        mat_clean = (matricula or "").strip().upper()
+        if not mat_clean:
+            raise ValueError("Matrícula da chefia é obrigatória.")
+
+        with ProdRealSyncSessionLocal() as session:
+            gestor = session.execute(
+                text(
+                    """
+                    SELECT id::text AS id, matricula, nome_funcional
+                    FROM servidores
+                    WHERE UPPER(matricula) = :mat
+                    LIMIT 1
+                    """
+                ),
+                {"mat": mat_clean},
+            ).mappings().first()
+
+            if gestor is None:
+                return {
+                    "gestorMatricula": mat_clean,
+                    "gestorNome": mat_clean,
+                    "unidades": [],
+                    "subordinados": [],
+                    "solicitacoesEquipe": [],
+                }
+
+            unidades_rows = session.execute(
+                text(
+                    """
+                    WITH RECURSIVE arvore_unidades AS (
+                        SELECT
+                            u.id,
+                            u.sigla,
+                            u.nome,
+                            u.tipo::text AS tipo,
+                            u.unidade_pai_id,
+                            0 AS nivel,
+                            g.papel::text AS papel_gestor
+                        FROM gestores_unidades g
+                        JOIN unidades_organizacionais u ON u.id = g.unidade_id
+                        WHERE g.servidor_id = CAST(:sid AS uuid)
+                          AND g.ativo = true
+                          AND (g.data_fim IS NULL OR g.data_fim >= CURRENT_DATE)
+                          AND u.ativo = true
+
+                        UNION ALL
+
+                        SELECT
+                            filha.id,
+                            filha.sigla,
+                            filha.nome,
+                            filha.tipo::text AS tipo,
+                            filha.unidade_pai_id,
+                            pai.nivel + 1 AS nivel,
+                            'SUBORDINADA'::text AS papel_gestor
+                        FROM unidades_organizacionais filha
+                        JOIN arvore_unidades pai ON filha.unidade_pai_id = pai.id
+                        WHERE filha.ativo = true
+                          AND pai.nivel < 12
+                    )
+                    SELECT DISTINCT ON (id)
+                        id::text AS id,
+                        sigla,
+                        nome,
+                        tipo,
+                        unidade_pai_id::text AS unidade_pai_id,
+                        nivel,
+                        papel_gestor
+                    FROM arvore_unidades
+                    ORDER BY id, nivel ASC
+                    """
+                ),
+                {"sid": gestor["id"]},
+            ).mappings().all()
+
+            unidades_sorted = sorted(
+                [dict(r) for r in unidades_rows],
+                key=lambda x: (x["nivel"], x["sigla"] or "", x["nome"] or ""),
+            )
+
+            unidade_ids = [u["id"] for u in unidades_sorted]
+            subordinados_list: list[dict[str, Any]] = []
+            solicitacoes_equipe: list[dict[str, Any]] = []
+
+            if unidade_ids:
+                subs_rows = session.execute(
+                    text(
+                        """
+                        SELECT DISTINCT ON (s.id)
+                            s.id::text AS id,
+                            s.matricula,
+                            COALESCE(s.nome_funcional, s.nome_completo_sarh, s.matricula) AS nome_funcional,
+                            COALESCE(us.email, '') AS email_institucional,
+                            COALESCE(s.descricao_situacao_sarh, CASE WHEN s.ativo THEN 'ATIVO' ELSE 'INATIVO' END) AS situacao,
+                            u.id::text AS unidade_id,
+                            u.sigla AS unidade_sigla,
+                            u.nome AS unidade_nome,
+                            c.descricao AS cargo_nome
+                        FROM lotacoes l
+                        JOIN servidores s ON s.id = l.servidor_id
+                        LEFT JOIN usuarios us ON us.id = s.usuario_id
+                        JOIN unidades_organizacionais u ON u.id = l.unidade_id
+                        LEFT JOIN cargos c ON c.id = l.cargo_id
+                        WHERE l.unidade_id = ANY(CAST(:uids AS uuid[]))
+                          AND l.status::text = 'ATIVO'
+                          AND (l.data_fim IS NULL OR l.data_fim >= CURRENT_DATE)
+                        ORDER BY s.id, l.data_inicio DESC
+                        """
+                    ),
+                    {"uids": unidade_ids},
+                ).mappings().all()
+
+                subordinados_list = sorted(
+                    [
+                        {
+                            "id": r["id"],
+                            "matricula": r["matricula"],
+                            "nomeFuncional": r["nome_funcional"],
+                            "email": r["email_institucional"] or "",
+                            "situacao": r["situacao"],
+                            "unidadeId": r["unidade_id"],
+                            "unidadeSigla": r["unidade_sigla"] or "",
+                            "unidadeNome": r["unidade_nome"] or "",
+                            "cargoNome": r["cargo_nome"] or "Servidor",
+                        }
+                        for r in subs_rows
+                    ],
+                    key=lambda x: (x["unidadeSigla"], x["nomeFuncional"]),
+                )
+
+                sub_ids = [s["id"] for s in subordinados_list]
+                if sub_ids:
+                    sol_rows = session.execute(
+                        text(
+                            """
+                            SELECT
+                                sa.id::text AS id,
+                                s.matricula,
+                                s.nome_funcional,
+                                sa.tipo::text AS tipo,
+                                sa.status::text AS status,
+                                sa.titulo,
+                                sa.data_referencia,
+                                sa.criado_em
+                            FROM solicitacoes_ajuste sa
+                            JOIN servidores s ON s.id = sa.servidor_id
+                            WHERE sa.servidor_id = ANY(CAST(:sids AS uuid[]))
+                            ORDER BY sa.criado_em DESC
+                            LIMIT 50
+                            """
+                        ),
+                        {"sids": sub_ids},
+                    ).mappings().all()
+
+                    solicitacoes_equipe = [
+                        {
+                            "id": r["id"],
+                            "matricula": r["matricula"],
+                            "servidorNome": r["nome_funcional"],
+                            "tipo": r["tipo"],
+                            "status": r["status"],
+                            "titulo": r["titulo"],
+                            "dataReferencia": (
+                                r["data_referencia"].strftime("%d/%m/%Y")
+                                if r["data_referencia"]
+                                else ""
+                            ),
+                            "criadoEm": (
+                                r["criado_em"].strftime("%d/%m/%Y %H:%M")
+                                if r["criado_em"]
+                                else ""
+                            ),
+                        }
+                        for r in sol_rows
+                    ]
+
+            return {
+                "gestorMatricula": gestor["matricula"],
+                "gestorNome": gestor["nome_funcional"],
+                "unidades": unidades_sorted,
+                "subordinados": subordinados_list,
+                "solicitacoesEquipe": solicitacoes_equipe,
+            }
+
+    def get_ferias_equipe(
+        self,
+        matricula: str,
+        perfil: str = "CHEFIA",
+        orgao_sigla: str = "SJAM",
+        ano: int = 2026,
+        servidor_matricula: str = "",
+    ) -> dict[str, Any]:
+        """Retorna programação de férias da equipe conforme o escopo RBAC (Chefia/Admin/Master)."""
+        mat_clean = (matricula or "").strip().upper()
+        perfil_clean = (perfil or "CHEFIA").strip().upper()
+        orgao_clean = (orgao_sigla or "SJAM").strip().upper()
+        filtro_serv = (servidor_matricula or "").strip().upper()
+
+        with ProdRealSyncSessionLocal() as session:
+            # 1. Determina servidores no escopo conforme perfil administrativo
+            servidores_rows: list[Any] = []
+            if perfil_clean == "MASTER":
+                servidores_rows = session.execute(
+                    text(
+                        """
+                        SELECT DISTINCT ON (s.id)
+                            s.id::text AS id,
+                            s.matricula,
+                            COALESCE(s.nome_funcional, s.nome_completo_sarh, s.matricula) AS nome_funcional,
+                            COALESCE(u.sigla, '') AS unidade_sigla,
+                            COALESCE(u.nome, '') AS unidade_nome
+                        FROM servidores s
+                        LEFT JOIN lotacoes l ON l.servidor_id = s.id AND l.status = 'ATIVA'
+                        LEFT JOIN unidades_organizacionais u ON u.id = l.unidade_id
+                        WHERE s.ativo = true
+                        ORDER BY s.id, l.data_inicio DESC NULLS LAST
+                        LIMIT 400
+                        """
+                    )
+                ).mappings().all()
+            elif perfil_clean == "SECAP":
+                servidores_rows = session.execute(
+                    text(
+                        """
+                        SELECT DISTINCT ON (s.id)
+                            s.id::text AS id,
+                            s.matricula,
+                            COALESCE(s.nome_funcional, s.nome_completo_sarh, s.matricula) AS nome_funcional,
+                            COALESCE(u.sigla, '') AS unidade_sigla,
+                            COALESCE(u.nome, '') AS unidade_nome
+                        FROM servidores s
+                        JOIN orgaos o ON o.id = s.orgao_id
+                        LEFT JOIN lotacoes l ON l.servidor_id = s.id AND l.status = 'ATIVA'
+                        LEFT JOIN unidades_organizacionais u ON u.id = l.unidade_id
+                        WHERE UPPER(o.sigla) = :orgao
+                          AND s.ativo = true
+                        ORDER BY s.id, l.data_inicio DESC NULLS LAST
+                        LIMIT 400
+                        """
+                    ),
+                    {"orgao": orgao_clean},
+                ).mappings().all()
+            elif perfil_clean == "CHEFIA":
+                escopo = self.get_chefia_escopo(mat_clean)
+                servidores_rows = [
+                    {
+                        "id": s["id"],
+                        "matricula": s["matricula"],
+                        "nome_funcional": s["nomeFuncional"],
+                        "unidade_sigla": s["unidadeSigla"],
+                        "unidade_nome": s["unidadeNome"],
+                    }
+                    for s in escopo.get("subordinados", [])
+                ]
+            else:
+                servidores_rows = session.execute(
+                    text(
+                        """
+                        SELECT DISTINCT ON (s.id)
+                            s.id::text AS id,
+                            s.matricula,
+                            COALESCE(s.nome_funcional, s.nome_completo_sarh, s.matricula) AS nome_funcional,
+                            COALESCE(u.sigla, '') AS unidade_sigla,
+                            COALESCE(u.nome, '') AS unidade_nome
+                        FROM servidores s
+                        LEFT JOIN lotacoes l ON l.servidor_id = s.id AND l.status = 'ATIVA'
+                        LEFT JOIN unidades_organizacionais u ON u.id = l.unidade_id
+                        WHERE UPPER(s.matricula) = :mat
+                        ORDER BY s.id, l.data_inicio DESC NULLS LAST
+                        """
+                    ),
+                    {"mat": mat_clean},
+                ).mappings().all()
+
+            serv_map = {r["id"]: dict(r) for r in servidores_rows}
+            serv_ids = list(serv_map.keys())
+            if filtro_serv:
+                target_ids = [
+                    sid for sid, info in serv_map.items()
+                    if info["matricula"].upper() == filtro_serv
+                ]
+            else:
+                target_ids = serv_ids
+
+            periodos: list[dict[str, Any]] = []
+            ultima_sync = datetime.now().strftime("%d/%m/%Y, %H:%M")
+
+            if target_ids:
+                afast_rows = session.execute(
+                    text(
+                        """
+                        SELECT
+                            a.id::text AS id,
+                            a.servidor_id::text AS servidor_id,
+                            a.data_inicio,
+                            a.data_fim,
+                            a.dias,
+                            a.exercicio,
+                            a.ativo,
+                            a.tipo_descricao,
+                            a.ultima_sincronizacao_sarh
+                        FROM afastamentos_sarh a
+                        WHERE a.servidor_id = ANY(CAST(:sids AS uuid[]))
+                          AND a.categoria = 'FERIAS'
+                          AND (
+                            EXTRACT(YEAR FROM a.data_inicio) = :ano
+                            OR EXTRACT(YEAR FROM a.data_fim) = :ano
+                          )
+                        ORDER BY a.data_inicio ASC
+                        LIMIT 500
+                        """
+                    ),
+                    {"sids": target_ids, "ano": ano},
+                ).mappings().all()
+
+                hoje = date.today()
+                for r in afast_rows:
+                    s_info = serv_map.get(r["servidor_id"], {})
+                    dt_ini: date = r["data_inicio"]
+                    dt_fim: date = r["data_fim"] or dt_ini
+                    if not r["ativo"]:
+                        status_cod = "INATIVA"
+                        status_lbl = "Inativa"
+                    elif dt_fim < hoje:
+                        status_cod = "GOZADA"
+                        status_lbl = "Gozada"
+                    else:
+                        status_cod = "PROGRAMADA"
+                        status_lbl = "Programada"
+
+                    mes_ref = dt_ini.month if dt_ini.year == ano else 1
+                    dias_calc = r["dias"] or ((dt_fim - dt_ini).days + 1)
+                    if r["ultima_sincronizacao_sarh"]:
+                        ultima_sync = r["ultima_sincronizacao_sarh"].strftime("%d/%m/%Y, %H:%M")
+
+                    periodos.append(
+                        {
+                            "id": r["id"],
+                            "matricula": s_info.get("matricula", ""),
+                            "servidorNome": s_info.get("nome_funcional", ""),
+                            "unidadeSigla": s_info.get("unidade_sigla", ""),
+                            "unidadeNome": s_info.get("unidade_nome", ""),
+                            "dataInicioIso": dt_ini.isoformat(),
+                            "dataFimIso": dt_fim.isoformat(),
+                            "dataInicioBr": dt_ini.strftime("%d/%m"),
+                            "dataFimBr": dt_fim.strftime("%d/%m"),
+                            "mes": mes_ref,
+                            "dias": int(dias_calc),
+                            "exercicio": r["exercicio"] or str(ano - 1),
+                            "status": status_cod,
+                            "statusLabel": status_lbl,
+                        }
+                    )
+
+            servidores_escopo = sorted(
+                [
+                    {
+                        "matricula": v["matricula"],
+                        "nomeFuncional": v["nome_funcional"],
+                        "unidadeSigla": v["unidade_sigla"],
+                        "unidadeNome": v["unidade_nome"],
+                    }
+                    for v in serv_map.values()
+                ],
+                key=lambda x: x["nomeFuncional"],
+            )
+
+            return {
+                "ano": ano,
+                "perfil": perfil_clean,
+                "ultimaSincronizacao": ultima_sync,
+                "servidoresEscopo": servidores_escopo,
+                "periodos": periodos,
+            }
+
+    def get_biometria_facial_status(self, matricula: str) -> dict[str, Any]:
+        with ProdRealSyncSessionLocal() as session:
+            srv = self._resolve_servidor(session, matricula)
+            return get_biometria_status(session, srv["servidor_id"])
+
+    def cadastrar_biometria_facial(
+        self,
+        *,
+        matricula: str,
+        embeddings: list[list[float]],
+        prova_vida_tipo: str,
+        prova_vida_aprovada: bool,
+        frames_analisados: int,
+        foto_referencia_base64: str | None = None,
+    ) -> dict[str, Any]:
+        with ProdRealSyncSessionLocal() as session:
+            srv = self._resolve_servidor(session, matricula)
+            return cadastrar_biometria_servidor(
+                session,
+                servidor_id=srv["servidor_id"],
+                embeddings=embeddings,
+                prova_vida_tipo=prova_vida_tipo,
+                prova_vida_aprovada=prova_vida_aprovada,
+                frames_analisados=frames_analisados,
+                foto_referencia_base64=foto_referencia_base64,
+            )
+
+    def registrar_ponto_facial_verificado(
+        self,
+        *,
+        matricula: str,
+        embedding: list[float],
+        prova_vida_tipo: str,
+        prova_vida_aprovada: bool,
+        frames_analisados: int,
+        observacao: str = "",
+    ) -> dict[str, Any]:
+        with ProdRealSyncSessionLocal() as session:
+            srv = self._resolve_servidor(session, matricula)
+            verificacao = verificar_biometria_servidor(
+                session,
+                servidor_id=srv["servidor_id"],
+                embedding=embedding,
+                prova_vida_tipo=prova_vida_tipo,
+                prova_vida_aprovada=prova_vida_aprovada,
+                frames_analisados=frames_analisados,
+            )
+
+        obs_final = (
+            f"{observacao.strip()} | Biometria Facial ({verificacao['confiancaPct']:.1f}%, prova de vida: {prova_vida_tipo})"
+            if observacao.strip()
+            else f"Biometria Facial ({verificacao['confiancaPct']:.1f}%, prova de vida: {prova_vida_tipo})"
+        )
+        marcacao = self.registrar_ponto_real(
+            matricula=matricula,
+            fonte="FACIAL",
+            observacao=obs_final,
+        )
+        return {
+            "marcacao": marcacao,
+            "verificacao": verificacao,
+        }
+
     @staticmethod
     def _normalizar_fonte(fonte_raw: str) -> str:
         f = fonte_raw.upper()
@@ -832,6 +1552,39 @@ class PostgresProdRealPontoRepository:
         if "WEB" in f:
             return "WEB"
         return "REP"
+
+    @staticmethod
+    def _resolver_icone_origem(
+        tipo_equip_icone: str | None,
+        fonte_raw: str | None,
+        origem_bruta: str | None,
+        equipamento: str | None,
+        tipo_classificado: str | None,
+    ) -> str:
+        valid_icons = {"facial", "relogio", "computador", "celular", "ajuste", "afd"}
+        if tipo_equip_icone:
+            norm = tipo_equip_icone.strip().lower()
+            if norm in valid_icons:
+                return norm
+
+        combined = " ".join(
+            part.upper()
+            for part in (fonte_raw, origem_bruta, equipamento, tipo_classificado)
+            if part
+        )
+        if (tipo_classificado or "").upper() == "MANUAL" or any(
+            k in combined for k in ("AJUSTE", "MANUAL", "ADMIN")
+        ):
+            return "ajuste"
+        if any(k in combined for k in ("SMARTPHONE", "MOBILE", "CELULAR", "ANDROID", "IOS", "APP")):
+            return "celular"
+        if any(k in combined for k in ("FACIAL", "FACE", "TOTEM", "IDFACE", "CONTROLID")):
+            return "facial"
+        if any(k in combined for k in ("WEB", "PORTAL", "NAVEGADOR", "BROWSER")):
+            return "computador"
+        if "AFD" in combined:
+            return "afd"
+        return "relogio"
 
     @staticmethod
     def _map_resultado_ui(resultado: str, cred: int, deb: int) -> tuple[str, str]:

@@ -77,35 +77,57 @@ export class SecpPontoStateService {
     {
       codigo: 'CHEFIA',
       nome: 'Chefia / Gestor',
-      descricao: 'Gestão de equipe, análise de solicitações, homologação mensal e boletim.',
+      descricao: 'Acesso às suas informações e de todos os servidores e unidades subordinadas.',
       permissions: [
         'dashboard:visualizar:proprio',
         'espelho-ponto:visualizar:proprio',
         'marcacoes:registrar-facial:proprio',
+        'marcacoes:consultar:proprio',
         'banco-horas:consultar:proprio',
-        'banco-horas:consultar:subordinados',
         'solicitacoes:criar:proprio',
+        'contracheque:consultar:proprio',
+        'afastamentos:consultar:proprio',
+        'programacao-ferias:consultar:proprio',
+        'horas-extras:visualizar:proprio',
+        'recesso:consultar:proprio',
+        'relatorios:consultar:proprio',
+        'substituicoes-funcao:relatorio:proprio',
+        'banco-horas:consultar:subordinados',
         'solicitacoes:analisar:subordinados',
         'homologacao:gerenciar:subordinados',
       ],
     },
     {
       codigo: 'SECAP',
-      nome: 'SECAP / NUCGP',
-      descricao: 'Recebimento de boletins, gestão de cadastros, férias e apuração seccional.',
+      nome: 'Administrador',
+      descricao: 'Acesso integral às informações e cadastros da Seccional/Órgão administrado.',
       permissions: [
         'dashboard:visualizar:proprio',
         'espelho-ponto:visualizar:proprio',
+        'marcacoes:registrar-facial:proprio',
+        'marcacoes:consultar:proprio',
         'banco-horas:consultar:proprio',
+        'solicitacoes:criar:proprio',
+        'contracheque:consultar:proprio',
+        'afastamentos:consultar:proprio',
+        'programacao-ferias:consultar:proprio',
+        'horas-extras:visualizar:proprio',
+        'recesso:consultar:proprio',
+        'relatorios:consultar:proprio',
+        'substituicoes-funcao:relatorio:proprio',
+        'banco-horas:consultar:subordinados',
         'banco-horas:gerenciar:seccional',
+        'solicitacoes:analisar:subordinados',
+        'homologacao:gerenciar:subordinados',
         'homologacao:consultar:seccional',
         'boletim-frequencia:receber:seccional',
+        'cadastros:gerenciar:seccional',
       ],
     },
     {
       codigo: 'MASTER',
-      nome: 'MASTER',
-      descricao: 'Administrador raiz com resolução dinâmica de todas as permissões e órgãos.',
+      nome: 'Master',
+      descricao: 'Acesso irrestrito a todas as informações e órgãos do módulo SECP Ponto.',
       permissions: ['*'],
     },
   ];
@@ -213,6 +235,14 @@ export class SecpPontoStateService {
     cargo_nome: string;
   }[]>([]);
   readonly realRegulamentacao = signal<RegulamentacaoOrgao | null>(null);
+  readonly loggedInMatricula = signal<string>('AM200385');
+  readonly chefiaEscopo = signal<{
+    gestorMatricula: string;
+    gestorNome: string;
+    unidades: { id: string; sigla: string; nome: string; tipo: string; unidade_pai_id: string | null; nivel: number; papel_gestor: string }[];
+    subordinados: { id: string; matricula: string; nomeFuncional: string; email: string; situacao: string; unidadeId: string; unidadeSigla: string; unidadeNome: string; cargoNome: string }[];
+    solicitacoesEquipe: { id: string; matricula: string; servidorNome: string; tipo: string; status: string; titulo: string; dataReferencia: string; criadoEm: string }[];
+  } | null>(null);
 
   // Signals de Autenticação & Navegação CARTO (Dupla Sidebar)
   readonly isAuthenticated = signal<boolean>(false);
@@ -261,8 +291,7 @@ export class SecpPontoStateService {
   readonly bancoDebitosMesMinutos = signal<number>(35); // -00h35
 
   // Signals de Competências do Espelho de Ponto
-  private readonly competenciasList = ['10/2025', '11/2025', '10/2026', '11/2026'] as const;
-  readonly competenciaIndex = signal<number>(3); // inicia em 11/2026
+  readonly selectedCompetencia = signal<{ ano: number; mes: number }>({ ano: 2026, mes: 11 });
   readonly sarhSincronizadoCompetencia = signal<Record<string, boolean>>({
     '10/2025': true,
     '11/2025': true,
@@ -274,16 +303,23 @@ export class SecpPontoStateService {
     this.criarDadosIniciaisEspelhos()
   );
 
+  readonly orgaosAcessiveis = signal<readonly OrgaoContexto[]>(this.orgaosDisponiveis);
+  readonly perfisDisponiveisNoOrgao = signal<readonly PerfilAcesso[]>(this.perfisRbac);
+
   // Computed Signals
   readonly activeOrgao = computed(
     () =>
+      this.orgaosAcessiveis().find((o) => o.id === this.activeOrgaoId()) ??
       this.orgaosDisponiveis.find((o) => o.id === this.activeOrgaoId()) ??
+      this.orgaosAcessiveis()[0] ??
       this.orgaosDisponiveis[0]
   );
 
   readonly activePerfil = computed(
     () =>
+      this.perfisDisponiveisNoOrgao().find((p) => p.codigo === this.activePerfilCodigo()) ??
       this.perfisRbac.find((p) => p.codigo === this.activePerfilCodigo()) ??
+      this.perfisDisponiveisNoOrgao()[0] ??
       this.perfisRbac[0]
   );
 
@@ -459,6 +495,20 @@ export class SecpPontoStateService {
           title: 'CHEFIA & SECAP',
           items: [
             {
+              id: 'chefia-equipe',
+              label: 'Equipe & Unidades Subordinadas',
+              description: 'Subordinados, unidades hierárquicas e solicitações da equipe.',
+              route: '/chefia/equipe',
+              requiredPermission: 'homologacao:gerenciar:subordinados',
+            },
+            {
+              id: 'chefia-ferias',
+              label: 'Programação de Férias da Equipe',
+              description: 'Calendário anual de férias dos subordinados com filtro por servidor.',
+              route: '/chefia/ferias',
+              requiredPermission: 'homologacao:gerenciar:subordinados',
+            },
+            {
               id: 'homologacao-equipe',
               label: 'Homologação da Equipe',
               description: 'Análise e homologação mensal dos subordinados.',
@@ -485,47 +535,48 @@ export class SecpPontoStateService {
         {
           title: 'ESTRUTURA & PESSOAS',
           items: [
-            { id: 'cad-orgaos', label: 'Órgãos / Seccionais', description: 'Cadastro de órgãos e seccionais.', route: '/cadastros/orgaos', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-unidades', label: 'Unidades Organizacionais', description: 'Varas, núcleos e seções.', route: '/cadastros/unidades-organizacionais', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-cargos', label: 'Cargos', description: 'Tabela de cargos efetivos e comissionados.', route: '/cadastros/cargos', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-funcoes', label: 'Funções Comissionadas', description: 'Referências FC e CJ.', route: '/cadastros/funcoes-confianca', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-categorias', label: 'Categorias de Pessoas', description: 'Classificação funcional.', route: '/cadastros/categorias-pessoas', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-servidores', label: 'Servidores', description: 'Cadastro mestre de servidores.', route: '/cadastros/servidores', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-lotacoes', label: 'Lotações', description: 'Vínculos de lotação nas unidades.', route: '/cadastros/lotacoes', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-gestores', label: 'Gestores de Unidades', description: 'Chefias imediatas e substitutos.', route: '/cadastros/gestores-unidades', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-identificadores', label: 'Identificadores de Ponto', description: 'PIS, crachá e matrícula REP.', route: '/cadastros/identificadores-ponto', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-dispensas', label: 'Dispensas de Ponto', description: 'Dispensas formais de marcação.', route: '/cadastros/dispensas-ponto', requiredPermission: 'dashboard:visualizar:proprio' },
+            { id: 'cad-orgaos', label: 'Órgãos / Seccionais', description: 'Cadastro de órgãos e seccionais.', route: '/cadastros/orgaos', requiredPermission: 'cadastros:gerenciar:seccional' },
+            { id: 'cad-unidades', label: 'Unidades Organizacionais', description: 'Varas, núcleos e seções.', route: '/cadastros/unidades-organizacionais', requiredPermission: 'cadastros:gerenciar:seccional' },
+            { id: 'cad-cargos', label: 'Cargos', description: 'Tabela de cargos efetivos e comissionados.', route: '/cadastros/cargos', requiredPermission: 'cadastros:gerenciar:seccional' },
+            { id: 'cad-funcoes', label: 'Funções Comissionadas', description: 'Referências FC e CJ.', route: '/cadastros/funcoes-confianca', requiredPermission: 'cadastros:gerenciar:seccional' },
+            { id: 'cad-categorias', label: 'Categorias de Pessoas', description: 'Classificação funcional.', route: '/cadastros/categorias-pessoas', requiredPermission: 'cadastros:gerenciar:seccional' },
+            { id: 'cad-servidores', label: 'Servidores', description: 'Cadastro mestre de servidores.', route: '/cadastros/servidores', requiredPermission: 'cadastros:gerenciar:seccional' },
+            { id: 'cad-lotacoes', label: 'Lotações', description: 'Vínculos de lotação nas unidades.', route: '/cadastros/lotacoes', requiredPermission: 'cadastros:gerenciar:seccional' },
+            { id: 'cad-gestores', label: 'Gestores de Unidades', description: 'Chefias imediatas e substitutos.', route: '/cadastros/gestores-unidades', requiredPermission: 'cadastros:gerenciar:seccional' },
+            { id: 'cad-identificadores', label: 'Identificadores de Ponto', description: 'PIS, crachá e matrícula REP.', route: '/cadastros/identificadores-ponto', requiredPermission: 'cadastros:gerenciar:seccional' },
+            { id: 'cad-dispensas', label: 'Dispensas de Ponto', description: 'Dispensas formais de marcação.', route: '/cadastros/dispensas-ponto', requiredPermission: 'cadastros:gerenciar:seccional' },
           ],
         },
         {
           title: 'JORNADAS & CALENDÁRIO',
           items: [
-            { id: 'cad-jornadas', label: 'Jornadas de Trabalho', description: 'Regimes de jornada (7h, 8h, estágio).', route: '/cadastros/jornadas', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-escalas', label: 'Escalas de Trabalho', description: 'Escalas cíclicas e plantões.', route: '/cadastros/escalas', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-fusos', label: 'Fusos Horários', description: 'Fusos IANA das seccionais.', route: '/cadastros/fusos-horarios', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-calendario', label: 'Calendário Institucional', description: 'Feriados, pontos facultativos e suspensões.', route: '/cadastros/calendarios-institucionais', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-tipos-feriado', label: 'Tipos de Feriados', description: 'Tipificação de feriados e suspensões.', route: '/cadastros/tipos-feriados-suspensoes', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-tipos-afast', label: 'Tipos de Afastamento SARH', description: 'Licenças e afastamentos SARH.', route: '/cadastros/tipos-afastamento-sarh', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-recessos', label: 'Recessos Forenses', description: 'Períodos de recesso forense.', route: '/cadastros/recessos-forenses', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-regulamentacoes', label: 'Regulamentações (Portarias)', description: 'Parâmetros normativos por órgão.', route: '/cadastros/regulamentacoes-orgaos', requiredPermission: 'dashboard:visualizar:proprio' },
+            { id: 'cad-jornadas', label: 'Jornadas de Trabalho', description: 'Regimes de jornada (7h, 8h, estágio).', route: '/cadastros/jornadas', requiredPermission: 'cadastros:gerenciar:seccional' },
+            { id: 'cad-escalas', label: 'Escalas de Trabalho', description: 'Escalas cíclicas e plantões.', route: '/cadastros/escalas', requiredPermission: 'cadastros:gerenciar:seccional' },
+            { id: 'cad-fusos', label: 'Fusos Horários', description: 'Fusos IANA das seccionais.', route: '/cadastros/fusos-horarios', requiredPermission: 'cadastros:gerenciar:seccional' },
+            { id: 'cad-calendario', label: 'Calendário Institucional', description: 'Feriados, pontos facultativos e suspensões.', route: '/cadastros/calendarios-institucionais', requiredPermission: 'cadastros:gerenciar:seccional' },
+            { id: 'cad-tipos-feriado', label: 'Tipos de Feriados', description: 'Tipificação de feriados e suspensões.', route: '/cadastros/tipos-feriados-suspensoes', requiredPermission: 'cadastros:gerenciar:seccional' },
+            { id: 'cad-tipos-afast', label: 'Tipos de Afastamento SARH', description: 'Licenças e afastamentos SARH.', route: '/cadastros/tipos-afastamento-sarh', requiredPermission: 'cadastros:gerenciar:seccional' },
+            { id: 'cad-recessos', label: 'Recessos Forenses', description: 'Períodos de recesso forense.', route: '/cadastros/recessos-forenses', requiredPermission: 'cadastros:gerenciar:seccional' },
+            { id: 'cad-regulamentacoes', label: 'Regulamentações (Portarias)', description: 'Parâmetros normativos por órgão.', route: '/cadastros/regulamentacoes-orgaos', requiredPermission: 'cadastros:gerenciar:seccional' },
           ],
         },
         {
           title: 'EQUIPAMENTOS & LOCALIDADES',
           items: [
-            { id: 'cad-equipamentos', label: 'Equipamentos Biométricos', description: 'REPs e totens faciais.', route: '/cadastros/equipamentos-biometricos', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-estados', label: 'Estados (UF)', description: 'Unidades da Federação.', route: '/cadastros/estados', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-cidades', label: 'Cidades / Municípios', description: 'Municípios brasileiros.', route: '/cadastros/cidades', requiredPermission: 'dashboard:visualizar:proprio' },
+            { id: 'cad-tipos-equipamento', label: 'Tipos de Equipamento Biométrico', description: 'Classificação e ícones dos meios de registro.', route: '/cadastros/tipos-equipamento-biometrico', requiredPermission: 'cadastros:gerenciar:seccional' },
+            { id: 'cad-equipamentos', label: 'Equipamentos Biométricos', description: 'REPs e totens faciais.', route: '/cadastros/equipamentos-biometricos', requiredPermission: 'cadastros:gerenciar:seccional' },
+            { id: 'cad-estados', label: 'Estados (UF)', description: 'Unidades da Federação.', route: '/cadastros/estados', requiredPermission: 'cadastros:gerenciar:seccional' },
+            { id: 'cad-cidades', label: 'Cidades / Municípios', description: 'Municípios brasileiros.', route: '/cadastros/cidades', requiredPermission: 'cadastros:gerenciar:seccional' },
           ],
         },
         {
           title: 'GOVERNANÇA & RBAC',
           items: [
-            { id: 'cad-usuarios', label: 'Usuários', description: 'Contas de acesso institucional.', route: '/cadastros/usuarios', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-perfis', label: 'Perfis RBAC', description: 'Papéis de acesso do sistema.', route: '/cadastros/perfis', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-permissoes', label: 'Permissões', description: 'Matriz recurso:acao:escopo.', route: '/cadastros/permissoes', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-integracoes', label: 'Sistemas Integrados', description: 'Conectores SARH, REP, Teams e SEI.', route: '/cadastros/integracoes-sistemas', requiredPermission: 'dashboard:visualizar:proprio' },
-            { id: 'cad-config', label: 'Configurações Globais', description: 'Domínios e flags globais.', route: '/cadastros/configuracoes-globais', requiredPermission: 'dashboard:visualizar:proprio' },
+            { id: 'cad-usuarios', label: 'Usuários', description: 'Contas de acesso institucional.', route: '/cadastros/usuarios', requiredPermission: 'perfis:gerenciar:seccional' },
+            { id: 'cad-perfis', label: 'Perfis RBAC', description: 'Papéis de acesso do sistema.', route: '/cadastros/perfis', requiredPermission: 'perfis:gerenciar:seccional' },
+            { id: 'cad-permissoes', label: 'Permissões', description: 'Matriz recurso:acao:escopo.', route: '/cadastros/permissoes', requiredPermission: 'perfis:gerenciar:seccional' },
+            { id: 'cad-integracoes', label: 'Sistemas Integrados', description: 'Conectores SARH, REP, Teams e SEI.', route: '/cadastros/integracoes-sistemas', requiredPermission: 'perfis:gerenciar:seccional' },
+            { id: 'cad-config', label: 'Configurações Globais', description: 'Domínios e flags globais.', route: '/cadastros/configuracoes-globais', requiredPermission: 'perfis:gerenciar:seccional' },
           ],
         },
       ],
@@ -678,9 +729,10 @@ export class SecpPontoStateService {
     return qtd % 2 === 1 ? 1 : 0;
   });
 
-  readonly competenciaAtual = computed(
-    () => this.competenciasList[this.competenciaIndex()]
-  );
+  readonly competenciaAtual = computed(() => {
+    const { ano, mes } = this.selectedCompetencia();
+    return `${String(mes).padStart(2, '0')}/${ano}`;
+  });
 
   readonly espelhoAtual = computed<EspelhoMensal>(() => {
     const comp = this.competenciaAtual();
@@ -785,11 +837,14 @@ export class SecpPontoStateService {
           this.authenticating.set(false);
           this.activeOrgaoId.set(orgaoId);
           this.activePerfilCodigo.set((res?.perfilPrincipal || 'SERVIDOR') as CodigoPerfilRbac);
-          this.servidorMatricula.set(res?.matricula || cleanUser.toUpperCase());
+          const matReal = res?.matricula || cleanUser.toUpperCase();
+          this.loggedInMatricula.set(matReal);
+          this.servidorMatricula.set(matReal);
           this.servidorNome.set(res?.nome || cleanUser.toUpperCase());
           this.servidorLotacao.set(`${this.activeOrgao().unidadeLabel}`);
           this.isAuthenticated.set(true);
           this.loadRealContext(this.servidorMatricula(), this.activeOrgao().sigla);
+          this.loadChefiaEscopo(matReal);
           this.pushToast('success', `Bem-vindo(a), ${this.servidorNome()}!`);
           onSuccess();
         },
@@ -806,17 +861,56 @@ export class SecpPontoStateService {
     this.activeOrgaoId.set(orgaoId);
     this.activePerfilCodigo.set(codigo);
     const mat = codigo === 'MASTER' ? 'SECP.MASTER' : 'AM200385';
+    this.loggedInMatricula.set(mat);
     this.servidorNome.set(codigo === 'MASTER' ? 'Administrador Geral do SECP' : 'FLAVIO OLIVEIRA DA ROCHA');
     this.servidorMatricula.set(mat);
     this.servidorLotacao.set(`${this.activeOrgao().unidadeLabel}`);
     this.isAuthenticated.set(true);
     this.loadRealContext(mat === 'SECP.MASTER' ? 'AM200385' : mat, this.activeOrgao().sigla);
+    this.loadChefiaEscopo(mat);
     this.pushToast('success', `Autenticado com perfil ${codigo} em ${this.activeOrgao().sigla}.`);
+  }
+
+  hasPermission(permission: string): boolean {
+    const perms = this.activePerfil().permissions;
+    return perms.includes('*') || perms.includes(permission);
+  }
+
+  loadChefiaEscopo(matricula: string): void {
+    const perfil = this.activePerfilCodigo();
+    if (perfil === 'SERVIDOR') {
+      this.chefiaEscopo.set(null);
+      return;
+    }
+    const mat = encodeURIComponent(matricula);
+    this.http.get<any>(`${this.apiRealBase}/chefia/subordinados?matricula=${mat}`).subscribe({
+      next: (res) => {
+        if (res && Array.isArray(res.unidades)) {
+          this.chefiaEscopo.set(res);
+        }
+      },
+      error: () => {
+        this.chefiaEscopo.set(null);
+      },
+    });
   }
 
   switchRealServidor(matricula: string): void {
     const clean = matricula.trim().toUpperCase();
     if (!clean) return;
+    const perfil = this.activePerfilCodigo();
+    if (perfil === 'SERVIDOR' && clean !== this.loggedInMatricula()) {
+      this.pushToast('warning', 'Perfil Servidor visualiza apenas suas próprias informações.');
+      return;
+    }
+    if (perfil === 'CHEFIA' && clean !== this.loggedInMatricula()) {
+      const subs = this.chefiaEscopo()?.subordinados ?? [];
+      const allowed = subs.some((s) => s.matricula.toUpperCase() === clean);
+      if (!allowed) {
+        this.pushToast('warning', 'Chefia só pode consultar servidores das unidades subordinadas.');
+        return;
+      }
+    }
     this.servidorMatricula.set(clean);
     this.loadRealContext(clean, this.activeOrgao().sigla);
     this.pushToast('info', `Carregando dados da matrícula ${clean}...`);
@@ -825,6 +919,7 @@ export class SecpPontoStateService {
   loadRealContext(matricula: string, orgaoSigla = 'SJAM'): void {
     const mat = encodeURIComponent(matricula);
     const org = encodeURIComponent(orgaoSigla);
+    this.syncRbacContextFromServer(matricula, orgaoSigla, this.activePerfilCodigo());
 
     this.http.get<any>(`${this.apiRealBase}/dashboard?matricula=${mat}`).subscribe({
       next: (res) => {
@@ -863,14 +958,18 @@ export class SecpPontoStateService {
       error: () => {},
     });
 
-    this.http.get<any[]>(`${this.apiRealBase}/servidores?orgao=${org}&limit=15`).subscribe({
-      next: (rows) => {
-        if (Array.isArray(rows)) {
-          this.realServidoresAmostra.set(rows);
-        }
-      },
-      error: () => {},
-    });
+    if (this.activePerfilCodigo() === 'SERVIDOR') {
+      this.realServidoresAmostra.set([]);
+    } else {
+      this.http.get<any[]>(`${this.apiRealBase}/servidores?orgao=${org}&limit=15`).subscribe({
+        next: (rows) => {
+          if (Array.isArray(rows)) {
+            this.realServidoresAmostra.set(rows);
+          }
+        },
+        error: () => {},
+      });
+    }
 
     const [mesStr, anoStr] = this.competenciaAtual().split('/');
     this.loadRealEspelho(matricula, Number(anoStr), Number(mesStr));
@@ -937,15 +1036,79 @@ export class SecpPontoStateService {
     document.documentElement.classList.toggle('high-contrast', this.highContrast());
   }
 
+  syncRbacContextFromServer(
+    matricula: string,
+    orgaoSiglaOrId?: string,
+    perfilCodigo?: string,
+    onDone?: () => void
+  ): void {
+    const cleanMat = (matricula || this.loggedInMatricula() || this.servidorMatricula()).trim();
+    if (!cleanMat) return;
+    const params: Record<string, string> = { matricula: cleanMat };
+    if (orgaoSiglaOrId) params['orgao'] = orgaoSiglaOrId;
+    if (perfilCodigo) params['perfil'] = perfilCodigo;
+
+    this.http.get<any>(`${this.apiRealBase}/rbac-context`, { params }).subscribe({
+      next: (ctx) => {
+        if (Array.isArray(ctx?.orgaosAcessiveis) && ctx.orgaosAcessiveis.length > 0) {
+          this.orgaosAcessiveis.set(ctx.orgaosAcessiveis);
+        }
+        if (ctx?.orgaoAtivo?.id) {
+          this.activeOrgaoId.set(ctx.orgaoAtivo.id);
+        }
+        const permsServidor: string[] = Array.isArray(ctx?.permissoes) ? ctx.permissoes : [];
+        if (Array.isArray(ctx?.perfisDisponiveisNoOrgao) && ctx.perfisDisponiveisNoOrgao.length > 0) {
+          const perfisMapped: PerfilAcesso[] = ctx.perfisDisponiveisNoOrgao.map((p: any) => {
+            const base = this.perfisRbac.find((r) => r.codigo === p.codigo);
+            const perms =
+              p.codigo === ctx?.perfilAtivo && permsServidor.length > 0
+                ? permsServidor
+                : base?.permissions ?? ['dashboard:visualizar:proprio', 'espelho-ponto:visualizar:proprio'];
+            return {
+              codigo: p.codigo,
+              nome: p.nome || base?.nome || p.codigo,
+              descricao: p.descricao || base?.descricao || p.nome || p.codigo,
+              permissions: perms,
+            };
+          });
+          this.perfisDisponiveisNoOrgao.set(perfisMapped);
+        }
+        if (ctx?.perfilAtivo) {
+          this.activePerfilCodigo.set(ctx.perfilAtivo as CodigoPerfilRbac);
+        }
+        onDone?.();
+      },
+      error: () => {
+        onDone?.();
+      },
+    });
+  }
+
   setOrgao(orgaoId: string): void {
     this.activeOrgaoId.set(orgaoId);
-    const org = this.activeOrgao();
-    this.pushToast('info', `Contexto alterado para ${org.unidadeLabel} (Fuso: ${org.fusoHorario}).`);
+    const matBase = this.loggedInMatricula() || this.servidorMatricula();
+    this.syncRbacContextFromServer(matBase, orgaoId, undefined, () => {
+      const org = this.activeOrgao();
+      const perfil = this.activePerfilCodigo();
+      this.loadRealContext(this.servidorMatricula(), org.sigla);
+      this.pushToast(
+        'info',
+        `Contexto alterado para ${org.unidadeLabel} • Perfil ${perfil} (Fuso: ${org.fusoHorario}).`
+      );
+    });
   }
 
   setPerfilRbac(codigo: CodigoPerfilRbac): void {
     this.activePerfilCodigo.set(codigo);
-    this.pushToast('info', `Perfil ativo alterado para ${codigo}. Navegação e permissões atualizadas.`);
+    const matBase = this.loggedInMatricula() || this.servidorMatricula();
+    const org = this.activeOrgao();
+    this.syncRbacContextFromServer(matBase, org.sigla, codigo, () => {
+      this.loadRealContext(
+        codigo === 'SERVIDOR' ? matBase : this.servidorMatricula(),
+        org.sigla
+      );
+      this.pushToast('info', `Perfil ativo alterado para ${codigo} em ${org.sigla}.`);
+    });
   }
 
   marcarNotificacoesComoLidas(): void {
@@ -1028,16 +1191,46 @@ export class SecpPontoStateService {
     return nova;
   }
 
-  // Ações do Espelho de Ponto
-  navegarCompetencia(delta: -1 | 1): void {
-    const next = this.competenciaIndex() + delta;
-    if (next >= 0 && next < this.competenciasList.length) {
-      this.competenciaIndex.set(next);
-      if (this.realDataLoaded()) {
-        const [mesStr, anoStr] = this.competenciaAtual().split('/');
-        this.loadRealEspelho(this.servidorMatricula(), Number(anoStr), Number(mesStr));
-      }
+  notificarBiometriaCadastrada(): void {
+    this.pushToast('success', 'Biometria facial cadastrada com sucesso!');
+  }
+
+  registrarMarcacaoFacialConfirmada(marcacao: MarcacaoBruta, confiancaPct: number): void {
+    if (marcacao?.id) {
+      this.marcacoesHoje.update((list) => {
+        if (list.some((m) => m.id === marcacao.id)) {
+          return list;
+        }
+        return [...list, marcacao];
+      });
+      this.pushToast(
+        'success',
+        `Marcação ${marcacao.tipoClassificado} registrada via Biometria Facial (${confiancaPct.toFixed(1)}% de confiabilidade) às ${marcacao.horario}.`
+      );
     }
+  }
+
+  // Ações do Espelho de Ponto
+  setCompetencia(ano: number, mes: number): void {
+    const mesNorm = Math.max(1, Math.min(12, mes));
+    this.selectedCompetencia.set({ ano, mes: mesNorm });
+    if (this.realDataLoaded()) {
+      this.loadRealEspelho(this.servidorMatricula(), ano, mesNorm);
+    }
+  }
+
+  navegarCompetencia(delta: -1 | 1): void {
+    const current = this.selectedCompetencia();
+    let mes = current.mes + delta;
+    let ano = current.ano;
+    if (mes < 1) {
+      mes = 12;
+      ano -= 1;
+    } else if (mes > 12) {
+      mes = 1;
+      ano += 1;
+    }
+    this.setCompetencia(ano, mes);
   }
 
   sincronizarSarhERecalcular(): void {

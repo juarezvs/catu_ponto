@@ -1,6 +1,7 @@
 import { CommonModule } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
-import { Component, OnInit, computed, inject, signal } from '@angular/core';
+import { Component, OnInit, computed, effect, inject, signal } from '@angular/core';
+import { SecpPontoStateService } from '../../core/services/secp-ponto-state.service';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { catchError, forkJoin, of } from 'rxjs';
@@ -281,6 +282,22 @@ interface GridFilterItem {
                 </svg>
                 <span>Clonar</span>
               </button>
+
+              @if (slug() === 'perfis') {
+                <button
+                  type="button"
+                  (click)="abrirModalPermissoes()"
+                  [disabled]="selectedRows().length !== 1"
+                  class="h-8 px-2.5 rounded hover:bg-[#f3f2f1] disabled:hover:bg-transparent disabled:opacity-45 disabled:cursor-not-allowed text-[#002f6c] font-semibold flex items-center gap-1.5 transition"
+                  title="Selecione 1 perfil para visualizar e editar suas permissões"
+                >
+                  <svg class="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M8 1.5l5 2v4c0 3.2-2.1 5.8-5 7-2.9-1.2-5-3.8-5-7v-4l5-2z"/>
+                    <path d="M5.8 8l1.5 1.5 3-3"/>
+                  </svg>
+                  <span>Permissões</span>
+                </button>
+              }
 
               <div class="relative">
                 <button
@@ -846,6 +863,109 @@ interface GridFilterItem {
         </div>
       </div>
     }
+
+    <!-- MODAL DE GERENCIAMENTO DE PERMISSÕES DO PERFIL -->
+    @if (permModalOpen()) {
+      <div class="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-xs flex items-center justify-center p-4" role="dialog" aria-modal="true">
+        <div class="bg-white rounded-2xl border border-slate-200 shadow-2xl w-full max-w-3xl max-h-[88vh] flex flex-col overflow-hidden">
+          <div class="px-6 py-4 bg-[#002f6c] text-white flex items-center justify-between">
+            <div>
+              <h3 class="text-base font-bold">Permissões do Perfil</h3>
+              @if (permPerfil(); as p) {
+                <p class="text-xs text-blue-100 mt-0.5">
+                  <strong>{{ p.codigo }}</strong> — {{ p.nome }} • {{ permSelectedIds().size }} de {{ todasPermissoes().length }} selecionadas
+                </p>
+              }
+            </div>
+            <button type="button" (click)="permModalOpen.set(false)" class="text-blue-200 hover:text-white text-lg">✕</button>
+          </div>
+
+          <div class="p-4 border-b border-slate-200 bg-slate-50 flex flex-wrap items-center gap-2">
+            <input
+              type="text"
+              [ngModel]="permSearch()"
+              (ngModelChange)="permSearch.set($event)"
+              placeholder="Filtrar permissões por código, recurso, ação ou descrição..."
+              class="flex-1 min-w-[220px] h-9 px-3 rounded-xl border border-slate-300 bg-white text-xs outline-none focus:border-[#002f6c]"
+            />
+          </div>
+
+          <div class="flex-1 overflow-y-auto p-5 space-y-4">
+            @if (permLoading()) {
+              <div class="py-12 text-center text-xs text-slate-500">Carregando permissões do perfil...</div>
+            } @else {
+              @for (grp of permGroupsFiltered(); track grp.recurso) {
+                <div class="rounded-xl border border-slate-200 overflow-hidden">
+                  <div class="px-4 py-2 bg-slate-100 border-b border-slate-200 flex items-center justify-between">
+                    <span class="text-xs font-extrabold uppercase tracking-wider text-[#002f6c]">
+                      {{ grp.recurso }} ({{ grp.itens.length }})
+                    </span>
+                    <div class="flex items-center gap-2 text-[11px]">
+                      <button
+                        type="button"
+                        (click)="selecionarGrupoPermissoes(grp.itens, true)"
+                        class="font-semibold text-[#003b80] hover:underline"
+                      >
+                        Marcar grupo
+                      </button>
+                      <span class="text-slate-300">|</span>
+                      <button
+                        type="button"
+                        (click)="selecionarGrupoPermissoes(grp.itens, false)"
+                        class="font-semibold text-slate-600 hover:underline"
+                      >
+                        Desmarcar
+                      </button>
+                    </div>
+                  </div>
+                  <div class="divide-y divide-slate-100">
+                    @for (perm of grp.itens; track perm.id) {
+                      <label class="flex items-start gap-3 px-4 py-2.5 hover:bg-blue-50/50 cursor-pointer text-xs">
+                        <input
+                          type="checkbox"
+                          [checked]="permSelectedIds().has(perm.id)"
+                          (change)="togglePermissao(perm.id)"
+                          class="mt-0.5 h-4 w-4 rounded border-slate-300 text-[#002f6c]"
+                        />
+                        <div class="min-w-0 flex-1">
+                          <div class="font-mono font-bold text-[#0f172a]">{{ perm.codigo }}</div>
+                          @if (perm.descricao) {
+                            <div class="text-[11px] text-slate-500 mt-0.5">{{ perm.descricao }}</div>
+                          }
+                        </div>
+                        <span class="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600">
+                          {{ perm.acao }} : {{ perm.escopo }}
+                        </span>
+                      </label>
+                    }
+                  </div>
+                </div>
+              } @empty {
+                <div class="py-10 text-center text-xs text-slate-500">Nenhuma permissão encontrada para o filtro informado.</div>
+              }
+            }
+          </div>
+
+          <div class="px-6 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2">
+            <button
+              type="button"
+              (click)="permModalOpen.set(false)"
+              class="h-9 px-4 rounded-xl border border-slate-300 bg-white text-xs font-semibold text-slate-700"
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              (click)="salvarPermissoesPerfil()"
+              [disabled]="permSaving() || permLoading()"
+              class="h-9 px-5 rounded-xl bg-[#007a33] hover:bg-[#005e27] disabled:opacity-50 text-white text-xs font-bold"
+            >
+              {{ permSaving() ? 'Salvando...' : 'Salvar Permissões' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    }
   `,
 })
 export class CadastroCrudPageComponent implements OnInit {
@@ -921,6 +1041,20 @@ export class CadastroCrudPageComponent implements OnInit {
   newFilterColumn = '';
   newFilterOperator: 'contains' | 'equals' | 'starts_with' = 'contains';
   newFilterValue = '';
+
+  private readonly state = inject(SecpPontoStateService);
+  private lastCtxKey = '';
+
+  constructor() {
+    effect(() => {
+      const key = `${this.state.activeOrgaoId()}|${this.state.activePerfilCodigo()}`;
+      if (this.lastCtxKey && key !== this.lastCtxKey && this.schema()) {
+        this.page.set(1);
+        this.carregarLista();
+      }
+      this.lastCtxKey = key;
+    });
+  }
 
   searchTerm = '';
   formData: Record<string, any> = {};
@@ -1499,6 +1633,107 @@ export class CadastroCrudPageComponent implements OnInit {
         this.carregarLista();
       }
     });
+  }
+
+  readonly permModalOpen = signal<boolean>(false);
+  readonly permLoading = signal<boolean>(false);
+  readonly permSaving = signal<boolean>(false);
+  readonly permPerfil = signal<{ id: string; codigo: string; nome: string } | null>(null);
+  readonly todasPermissoes = signal<
+    { id: string; codigo: string; recurso: string; acao: string; escopo: string; descricao: string }[]
+  >([]);
+  readonly permSelectedIds = signal<Set<string>>(new Set());
+  readonly permSearch = signal<string>('');
+
+  readonly permGroupsFiltered = computed(() => {
+    const q = this.permSearch().trim().toLowerCase();
+    const list = this.todasPermissoes().filter((p) =>
+      !q
+        ? true
+        : `${p.codigo} ${p.recurso} ${p.acao} ${p.escopo} ${p.descricao}`.toLowerCase().includes(q)
+    );
+    const map = new Map<string, typeof list>();
+    for (const p of list) {
+      const arr = map.get(p.recurso) ?? [];
+      arr.push(p);
+      map.set(p.recurso, arr);
+    }
+    return Array.from(map.entries()).map(([recurso, itens]) => ({ recurso, itens }));
+  });
+
+  abrirModalPermissoes(): void {
+    const rows = this.selectedRows();
+    const sc = this.schema();
+    if (rows.length !== 1 || !sc) return;
+    const perfilId = String(rows[0][sc.pkCol]);
+    this.permSearch.set('');
+    this.permModalOpen.set(true);
+    this.permLoading.set(true);
+
+    this.http
+      .get<{
+        perfil: { id: string; codigo: string; nome: string };
+        todasPermissoes: { id: string; codigo: string; recurso: string; acao: string; escopo: string; descricao: string }[];
+        permissoesIds: string[];
+      }>(`${this.apiBase}/perfis/${encodeURIComponent(perfilId)}/permissoes`)
+      .subscribe({
+        next: (res) => {
+          this.permPerfil.set(res.perfil);
+          this.todasPermissoes.set(res.todasPermissoes || []);
+          this.permSelectedIds.set(new Set(res.permissoesIds || []));
+          this.permLoading.set(false);
+        },
+        error: (err) => {
+          this.permLoading.set(false);
+          this.permModalOpen.set(false);
+          this.mostrarFeedback(err?.error?.detail || 'Erro ao carregar permissões do perfil.', true);
+        },
+      });
+  }
+
+  togglePermissao(permId: string): void {
+    this.permSelectedIds.update((prev) => {
+      const next = new Set(prev);
+      if (next.has(permId)) next.delete(permId);
+      else next.add(permId);
+      return next;
+    });
+  }
+
+  selecionarGrupoPermissoes(itens: { id: string }[], marcar: boolean): void {
+    this.permSelectedIds.update((prev) => {
+      const next = new Set(prev);
+      for (const item of itens) {
+        if (marcar) next.add(item.id);
+        else next.delete(item.id);
+      }
+      return next;
+    });
+  }
+
+  salvarPermissoesPerfil(): void {
+    const p = this.permPerfil();
+    if (!p) return;
+    this.permSaving.set(true);
+    this.http
+      .put<{ totalPermissoes: number }>(
+        `${this.apiBase}/perfis/${encodeURIComponent(p.id)}/permissoes`,
+        { permissoesIds: Array.from(this.permSelectedIds()) }
+      )
+      .subscribe({
+        next: (res) => {
+          this.permSaving.set(false);
+          this.permModalOpen.set(false);
+          this.mostrarFeedback(
+            `Permissões do perfil ${p.codigo} atualizadas (${res.totalPermissoes} vinculadas).`,
+            false
+          );
+        },
+        error: (err) => {
+          this.permSaving.set(false);
+          this.mostrarFeedback(err?.error?.detail || 'Erro ao salvar permissões do perfil.', true);
+        },
+      });
   }
 
   private mostrarFeedback(msg: string, isError: boolean): void {

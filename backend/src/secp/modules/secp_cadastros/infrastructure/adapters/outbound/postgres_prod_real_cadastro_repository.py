@@ -17,6 +17,9 @@ from secp.modules.secp_cadastros.domain.catalog import (
     CadastroDef,
     CadastroFieldDef,
 )
+from secp.modules.secp_cadastros.infrastructure.adapters.outbound.equipamentos_schema_bootstrap import (
+    ensure_tipos_equipamento_schema,
+)
 
 
 class PostgresProdRealCadastroRepository:
@@ -28,6 +31,15 @@ class PostgresProdRealCadastroRepository:
         if cdef is None:
             raise ValueError(f"Cadastro '{slug}' não encontrado no catálogo.")
         return cdef
+
+    @staticmethod
+    def _validate_uuid_or_none(val: str | None) -> str | None:
+        if not val:
+            return None
+        try:
+            return str(uuid.UUID(val.strip()))
+        except ValueError:
+            return None
 
     def list_catalog(self) -> list[dict[str, Any]]:
         cache_key = "secp:prod_real:cadastros:catalog"
@@ -190,6 +202,8 @@ class PostgresProdRealCadastroRepository:
         fields_out: list[dict[str, Any]] = []
 
         with ProdRealSyncSessionLocal() as session:
+            if slug in ("tipos-equipamento-biometrico", "equipamentos-biometricos"):
+                ensure_tipos_equipamento_schema(session)
             for f in cdef.fields:
                 options: list[dict[str, str]] = []
                 if f.input_type == "enum":
@@ -216,7 +230,7 @@ class PostgresProdRealCadastroRepository:
                             text(
                                 f'SELECT id::text AS value, ({f.fk_label_col})::text AS label '
                                 f'FROM "{f.fk_table}" '
-                                f'ORDER BY 2 ASC LIMIT 120'
+                                f'ORDER BY 2 ASC LIMIT 10000'
                             )
                         )
                         .mappings()
@@ -257,6 +271,15 @@ class PostgresProdRealCadastroRepository:
                             {"value": str(r["value"]).strip(), "label": str(r["label"])}
                             for r in fuso_rows
                         ]
+                    elif f.db_type == "icones_equipamento":
+                        options = [
+                            {"value": "facial", "label": "Rosto (Biometria Facial)"},
+                            {"value": "relogio", "label": "Relógio (Relógio de Ponto / REP)"},
+                            {"value": "computador", "label": "Computador (Sistema Web)"},
+                            {"value": "celular", "label": "Celular (Smartphone / App)"},
+                            {"value": "ajuste", "label": "Ajuste (Ajuste Administrativo)"},
+                            {"value": "afd", "label": "Arquivo (Importação AFD)"},
+                        ]
 
                 fields_out.append(
                     {
@@ -283,6 +306,21 @@ class PostgresProdRealCadastroRepository:
             "fields": fields_out,
         }
 
+    @staticmethod
+    def _resolve_ctx_orgao_id(orgao_id: str | None, orgao_sigla: str | None) -> str | None:
+        uid = PostgresProdRealCadastroRepository._validate_uuid_or_none(orgao_id)
+        if uid:
+            return uid
+        sigla = (orgao_sigla or "").strip().upper()
+        if not sigla:
+            return None
+        with ProdRealSyncSessionLocal() as session:
+            found = session.execute(
+                text("SELECT id::text FROM orgaos WHERE UPPER(sigla) = :s LIMIT 1"),
+                {"s": sigla},
+            ).scalar_one_or_none()
+            return str(found) if found else None
+
     def list_records(
         self,
         slug: str,
@@ -292,8 +330,16 @@ class PostgresProdRealCadastroRepository:
         filters_json: str = "",
         sort_by: str = "",
         sort_dir: str = "asc",
+        orgao_id: str | None = None,
+        orgao_sigla: str | None = None,
+        perfil: str | None = None,
     ) -> dict[str, Any]:
         cdef = self._get_def(slug)
+        if slug in ("tipos-equipamento-biometrico", "equipamentos-biometricos"):
+            with ProdRealSyncSessionLocal() as session:
+                ensure_tipos_equipamento_schema(session)
+        ctx_orgao_id = self._resolve_ctx_orgao_id(orgao_id, orgao_sigla)
+        is_master = (perfil or "").strip().upper() == "MASTER"
         if slug == "unidades-organizacionais":
             return self._list_unidades_organizacionais(
                 cdef=cdef,
@@ -303,6 +349,7 @@ class PostgresProdRealCadastroRepository:
                 filters_json=filters_json,
                 sort_by=sort_by,
                 sort_dir=sort_dir,
+                orgao_id=None if is_master else ctx_orgao_id,
             )
         if slug == "identificadores-ponto":
             return self._list_identificadores_ponto(
@@ -312,6 +359,7 @@ class PostgresProdRealCadastroRepository:
                 filters_json=filters_json,
                 sort_by=sort_by,
                 sort_dir=sort_dir,
+                orgao_id=None if is_master else ctx_orgao_id,
             )
         clean_search = (search or "").strip()
         offset = max(0, (page - 1) * page_size)
@@ -328,6 +376,41 @@ class PostgresProdRealCadastroRepository:
         where_parts: list[str] = []
         params: dict[str, Any] = {"limit": page_size, "offset": offset}
         field_by_name = {f.name: f for f in cdef.fields}
+
+        if ctx_orgao_id and not is_master:
+            if cdef.table_name == "orgaos":
+                where_parts.append(f'"{cdef.table_name}"."id" = CAST(:ctx_orgao_id AS uuid)')
+                params["ctx_orgao_id"] = ctx_orgao_id
+            elif "orgao_id" in field_by_name:
+                if cdef.table_name in (
+                    "jornadas",
+                    "funcoes_confianca_referencias",
+                    "categorias_pessoas",
+                    "calendarios_institucionais",
+                    "perfis",
+                ):
+                    where_parts.append(
+                        f'("{cdef.table_name}"."orgao_id" IS NULL OR "{cdef.table_name}"."orgao_id" = CAST(:ctx_orgao_id AS uuid))'
+                    )
+                else:
+                    where_parts.append(f'"{cdef.table_name}"."orgao_id" = CAST(:ctx_orgao_id AS uuid)')
+                params["ctx_orgao_id"] = ctx_orgao_id
+            elif "servidor_id" in field_by_name:
+                where_parts.append(
+                    f'EXISTS (SELECT 1 FROM servidores s_ctx WHERE s_ctx.id = "{cdef.table_name}"."servidor_id" AND s_ctx.orgao_id = CAST(:ctx_orgao_id AS uuid))'
+                )
+                params["ctx_orgao_id"] = ctx_orgao_id
+            elif cdef.table_name == "usuarios":
+                where_parts.append(
+                    '(EXISTS (SELECT 1 FROM servidores s_ctx WHERE s_ctx.usuario_id = "usuarios"."id" AND s_ctx.orgao_id = CAST(:ctx_orgao_id AS uuid)) '
+                    'OR EXISTS (SELECT 1 FROM usuarios_perfis up_ctx WHERE up_ctx.usuario_id = "usuarios"."id" AND up_ctx.orgao_id = CAST(:ctx_orgao_id AS uuid)))'
+                )
+                params["ctx_orgao_id"] = ctx_orgao_id
+            elif cdef.table_name == "escalas":
+                where_parts.append(
+                    'EXISTS (SELECT 1 FROM jornadas j_ctx WHERE j_ctx.id = "escalas"."jornada_id" AND (j_ctx.orgao_id IS NULL OR j_ctx.orgao_id = CAST(:ctx_orgao_id AS uuid)))'
+                )
+                params["ctx_orgao_id"] = ctx_orgao_id
 
         if clean_search:
             searchable_cols = list(dict.fromkeys([*cdef.columns, *cdef.search_columns]))
@@ -484,11 +567,15 @@ class PostgresProdRealCadastroRepository:
         filters_json: str = "",
         sort_by: str = "",
         sort_dir: str = "asc",
+        orgao_id: str | None = None,
     ) -> dict[str, Any]:
         clean_search = (search or "").strip()
         offset = max(0, (page - 1) * page_size)
         params: dict[str, Any] = {"limit": page_size, "offset": offset}
         where_parts: list[str] = []
+        if orgao_id:
+            where_parts.append("orgao_id = CAST(:ctx_orgao_id AS uuid)")
+            params["ctx_orgao_id"] = orgao_id
 
         if clean_search:
             q_lower = clean_search.lower()
@@ -656,11 +743,17 @@ class PostgresProdRealCadastroRepository:
         filters_json: str = "",
         sort_by: str = "",
         sort_dir: str = "asc",
+        orgao_id: str | None = None,
     ) -> dict[str, Any]:
         clean_search = (search or "").strip()
         offset = max(0, (page - 1) * page_size)
         params: dict[str, Any] = {"limit": page_size, "offset": offset}
         where_parts: list[str] = []
+        if orgao_id:
+            where_parts.append(
+                "EXISTS (SELECT 1 FROM servidores s_ctx WHERE s_ctx.id = ident_view.servidor_id AND s_ctx.orgao_id = CAST(:ctx_orgao_id AS uuid))"
+            )
+            params["ctx_orgao_id"] = orgao_id
 
         if clean_search:
             q_lower = clean_search.lower()
@@ -924,6 +1017,90 @@ class PostgresProdRealCadastroRepository:
             raise ValueError("Registro não encontrado para exclusão.")
         self._redis.invalidate_prefix("secp:prod_real:cadastros:")
         return {"deleted": True, "id": record_id}
+
+    def get_perfil_permissoes(self, perfil_id: str) -> dict[str, Any]:
+        pid = self._validate_uuid_or_none(perfil_id)
+        if not pid:
+            raise ValueError("Identificador de perfil inválido.")
+
+        with ProdRealSyncSessionLocal() as session:
+            perfil = session.execute(
+                text("SELECT id::text AS id, codigo, nome, descricao FROM perfis WHERE id = CAST(:pid AS uuid)"),
+                {"pid": pid},
+            ).mappings().first()
+            if not perfil:
+                raise ValueError("Perfil não encontrado.")
+
+            todas = session.execute(
+                text(
+                    """
+                    SELECT id::text AS id, codigo, recurso, acao, escopo, COALESCE(descricao, '') AS descricao
+                    FROM permissoes
+                    ORDER BY recurso ASC, codigo ASC
+                    """
+                )
+            ).mappings().all()
+
+            vinculadas = session.execute(
+                text("SELECT permissao_id::text FROM perfis_permissoes WHERE perfil_id = CAST(:pid AS uuid)"),
+                {"pid": pid},
+            ).scalars().all()
+
+        return {
+            "perfil": dict(perfil),
+            "todasPermissoes": [dict(r) for r in todas],
+            "permissoesIds": list(vinculadas),
+        }
+
+    def update_perfil_permissoes(
+        self,
+        perfil_id: str,
+        permissoes_ids: list[str],
+        actor_perfil: str | None = None,
+    ) -> dict[str, Any]:
+        actor = (actor_perfil or "").strip().upper()
+        if actor and actor not in ("ADMIN", "MASTER"):
+            raise PermissionError("Apenas perfis ADMIN ou MASTER podem alterar permissões de perfis.")
+
+        pid = self._validate_uuid_or_none(perfil_id)
+        if not pid:
+            raise ValueError("Identificador de perfil inválido.")
+
+        valid_ids = [
+            uid for uid in (self._validate_uuid_or_none(x) for x in permissoes_ids) if uid is not None
+        ]
+        unique_ids = list(dict.fromkeys(valid_ids))
+
+        with ProdRealSyncSessionLocal() as session:
+            exists = session.execute(
+                text("SELECT 1 FROM perfis WHERE id = CAST(:pid AS uuid)"),
+                {"pid": pid},
+            ).scalar_one_or_none()
+            if not exists:
+                raise ValueError("Perfil não encontrado.")
+
+            session.execute(
+                text("DELETE FROM perfis_permissoes WHERE perfil_id = CAST(:pid AS uuid)"),
+                {"pid": pid},
+            )
+            for perm_id in unique_ids:
+                session.execute(
+                    text(
+                        """
+                        INSERT INTO perfis_permissoes (id, perfil_id, permissao_id, criado_em)
+                        VALUES (CAST(:id AS uuid), CAST(:pid AS uuid), CAST(:perm_id AS uuid), NOW())
+                        """
+                    ),
+                    {"id": str(uuid.uuid4()), "pid": pid, "perm_id": perm_id},
+                )
+            session.commit()
+
+        self._redis.invalidate_prefix("secp:prod_real:")
+        return {
+            "perfilId": pid,
+            "totalPermissoes": len(unique_ids),
+            "permissoesIds": unique_ids,
+        }
 
     @staticmethod
     def _bind_expr(pname: str, f: CadastroFieldDef) -> str:

@@ -1,5 +1,13 @@
 export type FonteMarcacaoBruta = 'REP' | 'FACIAL' | 'AFD' | 'WEB';
 
+export type OrigemMarcacaoIcone =
+  | 'facial'
+  | 'relogio'
+  | 'computador'
+  | 'celular'
+  | 'ajuste'
+  | 'afd';
+
 export type TipoMarcacaoSequencia =
   | 'ENTRADA'
   | 'SAIDA_INTERVALO'
@@ -33,7 +41,77 @@ export interface MarcacaoBruta {
   readonly tipoClassificado: TipoMarcacaoSequencia;
   readonly hashSha256: string;
   readonly equipamentoOuOrigem: string;
+  readonly localizacao?: string;
+  readonly origemIcone?: OrigemMarcacaoIcone;
+  readonly tipoEquipamentoNome?: string;
+  readonly ajustada?: boolean;
   readonly imutavel: true;
+}
+
+export type StatusConferenciaDia =
+  | 'CALCULADA'
+  | 'AGUARDANDO'
+  | 'INCONSISTENTE'
+  | 'DISPENSADA'
+  | 'EXCEDENTE_PENDENTE';
+
+export type TipoDiaEspelho =
+  | 'NORMAL'
+  | 'DESCANSO'
+  | 'FERIADO'
+  | 'PONTO_FACULTATIVO'
+  | 'SUSPENSAO'
+  | 'RECESSO'
+  | 'TELETRABALHO'
+  | 'FERIAS'
+  | 'AFASTAMENTO'
+  | 'FUTURO'
+  | 'SEM_JORNADA';
+
+export interface TotalTipoHoraItem {
+  readonly codigo: string;
+  readonly label: string;
+  readonly cor: string;
+  readonly quantidadeRegistros: number;
+  readonly totalMinutos: number;
+  readonly participacaoPct: number;
+  readonly saldoObservacao: string;
+  readonly aguardandoAutorizacao?: boolean;
+}
+
+export interface OcorrenciaEspelhoItem {
+  readonly id: string;
+  readonly dataIso: string;
+  readonly dataFormatada: string;
+  readonly diaSemana: string;
+  readonly tipo: string;
+  readonly categoria: 'FALTA' | 'ATRASO' | 'SAIDA_ANTECIPADA' | 'EXTRA' | 'COMPENSACAO' | 'AFASTAMENTO' | 'OUTRA';
+  readonly periodo: string;
+  readonly duracaoMinutos: number;
+  readonly duracaoCobertaMinutos?: number;
+  readonly situacao: string;
+  readonly justificativa: string;
+  readonly origem: 'APURACAO' | 'SOLICITACAO' | 'SARH' | 'CALENDARIO';
+  readonly numeroPedido?: string;
+  readonly solicitacaoId?: string;
+  readonly podeEditar?: boolean;
+  readonly podeSolicitarAutorizacao?: boolean;
+  readonly podeExcluir?: boolean;
+}
+
+export interface HistoricoAjusteItem {
+  readonly id: string;
+  readonly dataSolicitacao: string;
+  readonly periodo: string;
+  readonly tipoAjuste: string;
+  readonly dataAfetada: string;
+  readonly status: 'APROVADO' | 'EM_ANALISE' | 'REPROVADO' | 'CANCELADO';
+  readonly statusLabel: string;
+  readonly aprovadoPor?: string;
+  readonly justificativa: string;
+  readonly observacaoAnalise?: string;
+  readonly anexos?: readonly { nome: string; url?: string }[];
+  readonly eventos?: readonly { dataHora: string; descricao: string; autor: string }[];
 }
 
 export interface MemoriaCalculoDia {
@@ -54,10 +132,17 @@ export interface ApuracaoDiaria {
   readonly diaUtil: boolean;
   readonly cargaPrevistaMinutos: number;
   readonly trabalhadoMinutos: number;
+  readonly intervaloMinutos?: number;
   readonly creditoMinutos: number;
   readonly debitoMinutos: number;
+  readonly excedenteAutorizadoMinutos?: number;
+  readonly excedentePendenteMinutos?: number;
+  readonly saldoMinutos?: number;
   readonly status: StatusApuracaoDia;
   readonly statusLabel: string;
+  readonly conferenciaStatus?: StatusConferenciaDia;
+  readonly tipoDia?: TipoDiaEspelho;
+  readonly contabilizavel?: boolean;
   readonly eventoInstitucional?: string;
   readonly marcacoes: readonly MarcacaoBruta[];
   readonly memoriaCalculo: MemoriaCalculoDia;
@@ -67,15 +152,27 @@ export interface EspelhoMensal {
   readonly competencia: string; // MM/YYYY
   readonly competenciaLabel: string;
   readonly statusCompetencia: StatusCompetenciaEspelho;
+  readonly statusCompetenciaLabel?: string;
   readonly ultimaSincronizacaoSarh: string;
   readonly ultimoRecalculo: string;
   readonly totalPrevistoMinutos: number;
   readonly totalTrabalhadoMinutos: number;
   readonly totalCreditoMinutos: number;
   readonly totalDebitoMinutos: number;
+  readonly totalExcedenteAutorizadoMinutos?: number;
+  readonly totalExcedentePendenteMinutos?: number;
   readonly bancoComputavelMinutos: number;
   readonly faltasOuInconsistencias: number;
+  readonly diasComJornada?: number;
+  readonly unidadeLabel?: string;
+  readonly chefiaNome?: string;
+  readonly enviadoEm?: string;
+  readonly homologadoEm?: string;
+  readonly homologadoPor?: string;
   readonly dias: readonly ApuracaoDiaria[];
+  readonly totaisPorTipo?: readonly TotalTipoHoraItem[];
+  readonly ocorrencias?: readonly OcorrenciaEspelhoItem[];
+  readonly historicoAjustes?: readonly HistoricoAjusteItem[];
 }
 
 export interface RegulamentacaoOrgao {

@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 
 from secp.modules.secp_cadastros.infrastructure.adapters.outbound.postgres_prod_real_cadastro_repository import (
     PostgresProdRealCadastroRepository,
@@ -64,6 +64,9 @@ def list_cadastro_records(
     filters: str = Query(default=""),
     sort_by: str = Query(default=""),
     sort_dir: str = Query(default="asc"),
+    orgao_id: str | None = Header(default=None, alias="X-SECP-Orgao-Id"),
+    orgao_sigla: str | None = Header(default=None, alias="X-SECP-Orgao-Sigla"),
+    perfil: str | None = Header(default=None, alias="X-SECP-Perfil"),
     repo: PostgresProdRealCadastroRepository = Depends(get_cadastros_repository),
 ) -> dict[str, Any]:
     try:
@@ -75,6 +78,9 @@ def list_cadastro_records(
             filters_json=filters,
             sort_by=sort_by,
             sort_dir=sort_dir,
+            orgao_id=orgao_id,
+            orgao_sigla=orgao_sigla,
+            perfil=perfil,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -115,3 +121,36 @@ def delete_cadastro_record(
         return repo.delete_record(slug=slug, record_id=record_id)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@cadastros_router.get("/perfis/{perfil_id}/permissoes")
+def get_perfil_permissoes(
+    perfil_id: str,
+    repo: PostgresProdRealCadastroRepository = Depends(get_cadastros_repository),
+) -> dict[str, Any]:
+    try:
+        return repo.get_perfil_permissoes(perfil_id=perfil_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@cadastros_router.put("/perfis/{perfil_id}/permissoes")
+def update_perfil_permissoes(
+    perfil_id: str,
+    payload: dict[str, Any] = Body(...),
+    perfil: str | None = Header(default=None, alias="X-SECP-Perfil"),
+    repo: PostgresProdRealCadastroRepository = Depends(get_cadastros_repository),
+) -> dict[str, Any]:
+    try:
+        raw_ids = payload.get("permissoesIds", [])
+        if not isinstance(raw_ids, list):
+            raise ValueError("Campo permissoesIds deve ser uma lista.")
+        return repo.update_perfil_permissoes(
+            perfil_id=perfil_id,
+            permissoes_ids=[str(x) for x in raw_ids],
+            actor_perfil=perfil,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc

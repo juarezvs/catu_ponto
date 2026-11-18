@@ -135,12 +135,19 @@ export class SearchableSelectComponent implements ControlValueAccessor {
   });
 
   readonly filteredOptions = computed(() => {
-    const q = this.searchTerm().trim().toLowerCase();
+    const normalize = (s: string) =>
+      s
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase();
+    const q = normalize(this.searchTerm().trim());
     const list = this._options();
-    if (!q) return list;
-    return list.filter(
-      (o) => o.label.toLowerCase().includes(q) || o.value.toLowerCase().includes(q)
-    );
+    if (!q) return list.slice(0, 150);
+    return list
+      .filter(
+        (o) => normalize(o.label).includes(q) || normalize(o.value).includes(q)
+      )
+      .slice(0, 150);
   });
 
   private onChange: (val: string) => void = () => {};

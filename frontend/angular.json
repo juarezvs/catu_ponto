@@ -20,7 +20,13 @@
               "zone.js"
             ],
             "tsConfig": "tsconfig.app.json",
-            "assets": [],
+            "assets": [
+              {
+                "glob": "{tiny_face_detector_model*,face_landmark_68_tiny_model*,face_recognition_model*,face_expression_model*}",
+                "input": "node_modules/@vladmandic/face-api/model",
+                "output": "assets/models/face-api"
+              }
+            ],
             "styles": [
               "src/styles.css"
             ],

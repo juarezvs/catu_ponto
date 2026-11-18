@@ -10,12 +10,14 @@ class TestSecpCadastrosProdReal(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.repo = get_cadastros_repository()
 
-    def test_catalog_has_all_26_cadastros(self) -> None:
+    def test_catalog_has_all_27_cadastros(self) -> None:
         cat = self.repo.list_catalog()
-        self.assertEqual(len(cat), 26)
+        self.assertEqual(len(cat), 27)
         slugs = {c["slug"] for c in cat}
         self.assertIn("orgaos", slugs)
         self.assertIn("servidores", slugs)
+        self.assertIn("tipos-equipamento-biometrico", slugs)
+        self.assertIn("equipamentos-biometricos", slugs)
         self.assertIn("configuracoes-globais", slugs)
 
     def test_all_26_schemas_and_lists_execute_cleanly(self) -> None:

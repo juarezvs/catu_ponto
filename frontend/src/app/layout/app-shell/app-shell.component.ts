@@ -447,14 +447,14 @@ export class AppShellComponent {
   });
 
   readonly orgaoOptions = computed(() =>
-    this.state.orgaosDisponiveis.map((o) => ({
+    this.state.orgaosAcessiveis().map((o) => ({
       value: o.id,
       label: `${o.unidadeLabel} (${o.fusoHorario})`,
     }))
   );
 
   readonly perfilOptions = computed(() =>
-    this.state.perfisRbac.map((p) => ({
+    this.state.perfisDisponiveisNoOrgao().map((p) => ({
       value: p.codigo,
       label: `${p.codigo} • ${p.nome}`,
     }))

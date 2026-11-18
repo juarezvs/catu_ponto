@@ -25,16 +25,27 @@ import { ControlValueAccessor, FormsModule, NG_VALUE_ACCESSOR } from '@angular/f
         [disabled]="disabled"
         [attr.minlength]="minlength"
         [placeholder]="placeholder"
-        [attr.autocomplete]="autocomplete"
+        [attr.autocomplete]="autocomplete === 'new-password' ? 'one-time-code' : autocomplete"
+        [attr.data-lpignore]="autocomplete === 'new-password' ? 'true' : null"
+        [readonly]="autocomplete === 'new-password' && !focused()"
+        (focus)="focused.set(true)"
         [ngClass]="inputClass"
         class="w-full pr-9 outline-none"
       />
       <button
         type="button"
-        (click)="toggleVisibility()"
-        [attr.aria-label]="visible() ? 'Ocultar senha' : 'Mostrar senha'"
-        [title]="visible() ? 'Ocultar senha' : 'Mostrar senha'"
-        class="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-[#002f6c] transition p-0.5"
+        (pointerdown)="$event.preventDefault(); visible.set(true)"
+        (pointerup)="visible.set(false)"
+        (pointerleave)="visible.set(false)"
+        (pointercancel)="visible.set(false)"
+        (keydown.space)="$event.preventDefault(); visible.set(true)"
+        (keyup.space)="visible.set(false)"
+        (keydown.enter)="$event.preventDefault(); visible.set(true)"
+        (keyup.enter)="visible.set(false)"
+        (blur)="visible.set(false)"
+        aria-label="Segure para mostrar a senha"
+        title="Segure para mostrar a senha"
+        class="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-[#002f6c] transition p-0.5 select-none"
       >
         @if (visible()) {
           <!-- Olho cortado (ocultar) -->
@@ -65,6 +76,7 @@ export class PasswordInputComponent implements ControlValueAccessor {
 
   readonly value = signal<string>('');
   readonly visible = signal<boolean>(false);
+  readonly focused = signal<boolean>(false);
 
   private onChange: (val: string) => void = () => {};
   onTouched: () => void = () => {};

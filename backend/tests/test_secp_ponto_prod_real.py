@@ -59,7 +59,7 @@ class TestSecpPontoProdReal(unittest.TestCase):
         )
         self.assertEqual(espelho["competencia"], "10/2025")
         self.assertIsInstance(espelho["dias"], list)
-        cached = self.redis.get_json("secp:prod_real:espelho:AM200385:2025:10")
+        cached = self.redis.get_json("secp:prod_real:espelho:v4:AM200385:2025:10")
         self.assertIsNotNone(cached)
 
     def test_real_solicitacoes_validation_rejects_blank_desc(self) -> None:

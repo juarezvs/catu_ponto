@@ -16,6 +16,7 @@ from secp.modules.secp_ponto.infrastructure.adapters.inbound.real_ponto_router i
 from secp.modules.secp_cadastros.infrastructure.adapters.inbound.cadastros_router import (
     cadastros_router,
 )
+from secp.contexts.compliance_router import compliance_router
 
 
 def create_app() -> FastAPI:
@@ -39,6 +40,7 @@ def create_app() -> FastAPI:
     app.include_router(ponto_router)
     app.include_router(real_ponto_router)
     app.include_router(cadastros_router)
+    app.include_router(compliance_router)
     return app
 
 
